@@ -1,0 +1,662 @@
+# AI Workflow — 使用手册
+
+融合 OpenSpec、GSD、Superpowers 三套工具的统一工作流。
+
+---
+
+## 目录
+
+1. [设计理念](#设计理念)
+2. [架构原理](#架构原理)
+3. [命令一览](#命令一览)
+4. [安装与验证](#安装与验证)
+5. [快速上手](#快速上手)
+6. [命令详解](#命令详解)
+7. [文件桥梁机制](#文件桥梁机制)
+8. [降级策略](#降级策略)
+9. [常见场景](#常见场景)
+10. [故障排查](#故障排查)
+11. [自定义与扩展](#自定义与扩展)
+
+---
+
+## 设计理念
+
+### 核心问题
+
+使用 AI 辅助编程时，最常遇到的三个问题：
+
+1. **需求漂移** — 做着做着偏离了最初的目标
+2. **状态丢失** — 中断后无法恢复上下文，不知做到哪了
+3. **执行无序** — 没有方法论约束，改代码随意，容易引入 bug
+
+### 三个工具各有所长
+
+| 工具 | 擅长 | 层级 | 安装位置 |
+|------|------|------|----------|
+| **OpenSpec** | 规格定义、验收标准、需求边界 | Spec Layer | npm 全局 + `~/.claude/skills/` 全局 |
+| **GSD** | 状态管理、中断恢复、任务编排 | State Layer | `~/.claude/skills/` 全局 |
+| **Superpowers** | TDD、Brainstorm、系统化调试 | Execution Skill Layer | `~/.claude/skills/` 全局 |
+
+单独使用任何一套都有短板：OpenSpec 不管执行，GSD 不管需求定义，Superpowers 不管状态持久化。
+
+### 核心思路
+
+```
+Spec → Plan/State → Execute → Review → Sync Back
+```
+
+- **OpenSpec 定义做什么**（proposal → specs → design → tasks）
+- **GSD 管理做到哪了**（STATE.md、ROADMAP.md、phase 结构）
+- **Superpowers 约束怎么做**（TDD Red→Green→Refactor、假设-验证循环）
+
+三者不并列触发，而是**顺序接力**。
+
+---
+
+## 架构原理
+
+### 整体架构
+
+```
+┌─────────────────────────────────────────────────┐
+│                  /ai:* 命令层                      │
+│  spec  plan  do  debug  check  lint  resume │
+└──────┬──────┬──────┬──────┬──────┬──────┬──────┘
+       │      │      │      │      │      │      │
+       ▼      ▼      ▼      ▼      ▼      ▼      ▼
+┌──────────┐ ┌──────────┐ ┌──────────┐
+│ OpenSpec │ │   GSD    │ │Superpowers│
+│ (规格定义) │ │(状态管理) │ │ (执行技法) │
+│ npm 全局  │ │~/.claude │ │~/.claude │
+└────┬─────┘ └────┬─────┘ └────┬─────┘
+     │            │            │
+     └────────────┼────────────┘
+                  ▼
+           ┌─────────────┐
+           │  文件桥梁     │
+           │ (MD 文件交接)  │
+           └─────────────┘
+```
+
+### 为什么用文件做桥梁
+
+如果只靠会话上下文串联，会出现：
+
+- 上一步的结论容易丢
+- 非目标和限制条件容易忘
+- 当前 task 会不断漂移
+- 中断后很难恢复
+- 多轮协作没有稳定输入输出
+
+**文件不是附属品，是桥梁。** 每个命令读取上一步产出的文件，写入当前步骤的产出，下一步命令再读取。文件是唯一可靠的跨命令交接机制。
+
+### Prompt Wrapper + Bash Bridge 实现模式
+
+Claude Code 的 custom slash command 本质是 Markdown prompt 模板，**不支持命令嵌套**（一个命令不能直接调用另一个命令）。因此采用两种实现模式：
+
+**Prompt Wrapper**：命令文件本身就是一个 prompt，指导 Claude 按步骤执行。大多数命令采用这种模式。
+
+**Bash Bridge**：命令中通过 `!` 嵌入 bash 命令，读取文件内容并注入 prompt 上下文。例如读取 STATE.md 获取当前状态、读取 OpenSpec 产出获取规格。
+
+```
+/ai:spec ──Skill──▶ opsx:propose
+/ai:do   ──Skill──▶ gsd-execute-phase
+/ai:lint ──Skill──▶ gsd-code-review
+/ai:plan ──Skill──▶ gsd-discuss-phase + gsd-plan-phase
+```
+
+对于底层工具不可用的场景（如缺少前置文件），采用**降级策略**，用等价的手动流程替代，不会卡住。
+
+---
+
+## 命令一览
+
+7 个命令，每个只做一件事：
+
+| 命令 | 功能 | 输入 | 底层调用 |
+|------|------|------|----------|
+| `/ai:spec` | 需求定义 | 功能名称或描述 | `opsx:propose` + 自动 GSD 初始化 |
+| `/ai:plan` | 完整规划 | OpenSpec change 名称 | `gsd-discuss-phase` + `gsd-plan-phase` |
+| `/ai:do` | 执行任务 | phase 编号（可选） | `gsd-execute-phase` + Superpowers 技法 |
+| `/ai:debug` | 系统化调试 | 问题描述或 slug | `gsd-debug` |
+| `/ai:check` | 规格覆盖度验证 | change 名称（可选） | 手动对照 spec 验证 |
+| `/ai:lint` | 代码质量审查 | phase 编号（可选） | `gsd-code-review`（降级：手动审查） |
+| `/ai:resume` | 恢复上下文 | 无 | `gsd-resume-work` + OpenSpec 交叉对照 |
+
+### 命令设计原则
+
+- **轻量化**：每个命令只做一件事，不用参数区分模式
+- **可降级**：底层工具不可用时自动降级为手动流程
+- **自动桥接**：命令之间通过文件交接，不需要用户手动搬运
+- **中文输出**：所有输出面向中文用户
+
+---
+
+## 使用方法
+
+### 前置条件
+
+三个底层工具均为**全局安装**，一次配置，所有项目通用：
+
+1. **OpenSpec CLI + Skills** — 规格定义工具（全局安装）
+   - CLI：`npm install -g @fission-ai/openspec`
+   - Skills：将 `openspec-*` skills 复制到 `~/.claude/skills/`
+   - 包含 4 个 skills：`openspec-propose`、`openspec-apply-change`、`openspec-explore`、`openspec-archive-change`
+
+2. **GSD skills** — 状态管理与执行编排（全局安装）
+   - 按 [get-shit-done-cc](https://github.com/nicekid1/get-shit-done-cc) 项目说明安装
+   - 安装位置：`~/.claude/skills/gsd-*/`
+   - 包含 60+ skills（gsd-execute-phase、gsd-code-review、gsd-debug 等）
+
+3. **Superpowers** — 执行技法（全局安装）
+   - 按 [superpowers](https://github.com/nicekid1/Superpowers) 项目说明安装
+   - 安装位置：`~/.claude/skills/superpowers/`
+   - 包含 14 个子技能：test-driven-development、systematic-debugging、brainstorming、writing-plans 等
+
+4. **/ai:* 命令** — 本套工作流的统一入口（项目级）
+   - 安装位置：项目根目录 `.claude/commands/ai/`
+   - 每个项目独立配置，可根据项目特点定制
+
+### 命令调用
+
+在 Claude Code 中直接输入斜杠命令：
+
+```
+/ai:spec add-user-auth
+/ai:plan add-user-auth
+/ai:do
+/ai:check
+/ai:lint
+/ai:debug "登录后白屏"
+/ai:resume
+```
+
+### 输入参数
+
+- **必填参数**：直接跟在命令后面，如 `/ai:spec add-user-auth`
+- **可选参数**：省略时自动从 STATE.md 推断当前上下文，如 `/ai:do`
+- **空参数**：某些命令空输入会列出已有资源，如 `/ai:debug`（列出 debug 会话）
+
+---
+
+## 设计流程
+
+### 主流程：新需求从 0 到 1
+
+```
+/ai:spec → /ai:plan → /ai:do → /ai:check → /ai:lint
+   │          │         │         │          │
+   ▼          ▼         ▼         ▼          ▼
+ OpenSpec   GSD      GSD +     对照 spec   代码质量
+ 产出规格   生成计划  Superpowers 验证覆盖   审查
+                    执行
+```
+
+每一步的产出是下一步的输入，交接物是文件而非对话上下文。
+
+### 各命令的内部流程
+
+#### `/ai:spec` — 需求定义
+
+```
+理解需求 → 调用 opsx:propose → 自动桥接 GSD
+                                │
+                                ├── 检查 GSD 是否已初始化
+                                ├── 未初始化 → 轻量初始化（PROJECT.md/ROADMAP.md/STATE.md/config.json）
+                                └── 已初始化 → 追加 phase，更新 STATE.md
+```
+
+产出：
+- `openspec/changes/<name>/proposal.md` — 为什么做、目标、非目标
+- `openspec/changes/<name>/specs/<capability>/spec.md` — 验收标准
+- `openspec/changes/<name>/design.md` — 技术选型、取舍、风险
+- `openspec/changes/<name>/tasks.md` — 可执行任务列表
+- `.planning/PROJECT.md` / `ROADMAP.md` / `STATE.md` / `config.json` — GSD 状态
+
+#### `/ai:plan` — 轻量规划
+
+```
+验证 change 存在 → 读取 OpenSpec 产出 → 检查 GSD 状态
+→ 生成 CONTEXT.md → 生成 PLAN.md → 更新 STATE.md
+```
+
+产出：
+- `.planning/phases/<name>/<NN>-CONTEXT.md` — 实现决策上下文
+- `.planning/phases/<name>/<NN>-PLAN.md` — 执行计划（Wave 分组 + TDD 标注）
+
+适用场景：需求已明确，直接从 OpenSpec 产出快速生成计划。
+
+#### `/ai:plan-full` — 完整规划
+
+```
+加载 OpenSpec 上下文 → gsd-discuss-phase → gsd-plan-phase
+```
+
+适用场景：需求有灰色地带、架构选型不确定、需要多轮讨论。
+
+#### `/ai:do` — 执行任务
+
+```
+确认状态 → 按 PLAN.md 执行 → 同步 OpenSpec tasks.md checkbox
+```
+
+执行技法（按 task type 自动选用）：
+
+| Task 类型 | 技法 | 流程 |
+|-----------|------|------|
+| 功能类 (`tdd`) | TDD | Red → Green → Refactor |
+| 设计类 (`brainstorm`) | Brainstorm | 列方案 → 比优缺点 → 选定 → 实施 |
+| 修 bug 类 | Systematic Debugging | 复现 → 假设 → 验证 → 最小修复 → 确认 |
+| 所有类型 | Verification | 测试通过 + 满足 AC + 无回归 + 代码干净 |
+
+#### `/ai:debug` — 系统化调试
+
+```
+收集证据 → 形成 1-3 个假设 → 验证假设 → 最小修复 → 验证修复
+```
+
+绝对禁止：没假设就改代码 / 一次改多处看效果 / 改完不复测。
+
+#### `/ai:check` — 规格覆盖度验证
+
+```
+定位 change → 读取 spec 验收标准 → 逐条对照代码和测试 → 三维度评分
+```
+
+三维度：
+- **完整性 (Completeness)**：所有 spec 验收标准和 tasks 是否都已实现
+- **正确性 (Correctness)**：实现是否与 spec 描述一致
+- **一致性 (Coherence)**：实现是否符合 design.md 的设计决策
+
+#### `/ai:lint` — 代码质量审查
+
+```
+确定 phase → 调用 gsd-code-review → 降级处理（如需）
+```
+
+审查维度：正确性、安全性、代码质量、测试覆盖。发现按 CRITICAL / WARNING / INFO 分级。
+
+#### `/ai:resume` — 恢复上下文
+
+```
+gsd-resume-work → 读取 OpenSpec 状态 → 交叉对照 → 推荐下一步
+```
+
+跨会话恢复工作状态，检查 GSD 和 OpenSpec 状态是否一致。
+
+---
+
+## 文件桥梁机制
+
+### 目录结构
+
+```
+项目根目录/
+├── openspec/
+│   ├── specs/                          # 全局规格
+│   └── changes/                        # 变更规格
+│       └── <change-name>/
+│           ├── .openspec.yaml          # change 配置
+│           ├── proposal.md             # 为什么要做
+│           ├── design.md               # 怎么做（技术选型）
+│           ├── tasks.md                # 任务列表（checkbox）
+│           └── specs/                  # 能力规格
+│               └── <capability>/
+│                   └── spec.md         # 验收标准（SHALL/MUST）
+│
+├── .planning/                          # GSD 状态管理
+│   ├── PROJECT.md                      # 项目概述
+│   ├── ROADMAP.md                      # 里程碑和 phase
+│   ├── STATE.md                        # 当前状态 + OpenSpec 关联
+│   ├── config.json                     # GSD 配置
+│   └── phases/
+│       └── <phase-name>/
+│           ├── <NN>-CONTEXT.md          # 实现决策上下文
+│           └── <NN>-PLAN.md            # 执行计划（Wave + Task）
+│
+└── .claude/commands/ai/                # 命令定义
+    ├── spec.md
+    ├── plan.md
+    ├── plan-full.md
+    ├── do.md
+    ├── debug.md
+    ├── check.md
+    ├── lint.md
+    └── resume.md
+```
+
+### 文件流转关系
+
+```
+/ai:spec                    /ai:plan                    /ai:do
+    │                           │                           │
+    ▼                           ▼                           ▼
+proposal.md ──────────────▶ CONTEXT.md ──────────────▶ 代码 + 测试
+design.md  ──────────────▶ PLAN.md   ──────────────▶ STATE.md 更新
+tasks.md   ──────────────▶ STATE.md  ──────────────▶ tasks.md checkbox
+spec.md    ──────────────▶ ──────────┼──────────────▶ ──────────────
+                                      │
+                    ┌─────────────────┤
+                    ▼                 ▼
+              /ai:check          /ai:lint
+                    │                 │
+                    ▼                 ▼
+              对照 spec.md       对照 git diff
+              验证覆盖度         审查代码质量
+```
+
+### 关键交接点
+
+| 交接 | 从 → 到 | 交接文件 |
+|------|---------|----------|
+| spec → plan | OpenSpec → GSD | proposal.md, design.md, tasks.md, spec.md |
+| plan → do | GSD → 执行 | CONTEXT.md, PLAN.md, STATE.md |
+| do → check | 执行 → 验证 | 代码 + 测试, spec.md, tasks.md |
+| do → lint | 执行 → 审查 | 代码 + git diff, PLAN.md |
+| check ↔ lint | 验证 ↔ 审查 | 互为补充，不重复 |
+
+---
+
+## 降级策略
+
+当底层工具不可用时，命令会自动降级为手动流程，不会卡住：
+
+| 命令 | 底层工具 | 降级方案 |
+|------|----------|----------|
+| `/ai:spec` | `opsx:propose` | 按 OpenSpec schema 手动创建文件 |
+| `/ai:plan` | 直接生成 | 不依赖底层工具，无需降级 |
+| `/ai:lint` | `gsd-code-review` | 手动逐文件审查（正确性、安全性、质量、覆盖） |
+| `/ai:do` | `gsd-execute-phase` | 按 PLAN.md 手动逐 task 执行 |
+| `/ai:debug` | `gsd-debug` | 按假设-验证循环手动调试 |
+| `/ai:check` | 手动验证 | 不依赖底层工具，无需降级 |
+| `/ai:resume` | `gsd-resume-work` | 手动读取 STATE.md 和 OpenSpec 状态 |
+
+降级时输出质量可能略低于底层工具，但**流程不中断**。
+
+---
+
+## 端到端示例
+
+以"添加 GET /hello 端点"为例，展示完整流程。
+
+### 第 1 步：`/ai:spec add-hello-endpoint`
+
+输入功能名称，自动生成：
+
+```
+openspec/changes/add-hello-endpoint/
+├── proposal.md      ← 为什么：验证服务器正常运行
+├── design.md        ← 怎么做：Express + res.json() + Jest
+├── tasks.md         ← 任务：初始化项目 → 实现路由 → 编写测试
+└── specs/hello-endpoint/
+    └── spec.md      ← 验收标准：返回 200、{ "message": "你好，世界！" }、JSON
+
+.planning/
+├── PROJECT.md       ← 自动从 proposal 提取
+├── ROADMAP.md       ← 自动创建里程碑
+├── STATE.md         ← 状态：规格已定义，待规划
+└── config.json      ← 最小配置
+```
+
+### 第 2 步：`/ai:plan add-hello-endpoint`
+
+从 OpenSpec 产出直接生成执行计划：
+
+```
+.planning/phases/add-hello-endpoint/
+├── 01-CONTEXT.md    ← 从 design.md 提取实现决策
+└── 02-PLAN.md       ← 3 个 Wave，4 个 Task：
+                        Wave 1: 项目初始化（setup）
+                        Wave 2: 端点实现（tdd: Red→Green→Refactor）
+                        Wave 3: 验证（verify）
+```
+
+### 第 3 步：`/ai:do`
+
+按 PLAN.md 执行，TDD 循环：
+
+1. **Red** — 写 3 个测试，全部失败
+2. **Green** — 添加 `app.get('/hello', ...)` 路由，3 个测试通过
+3. **Refactor** — 代码已干净，无需重构
+
+执行完自动同步 `openspec/changes/add-hello-endpoint/tasks.md` 的 checkbox。
+
+### 第 4 步：`/ai:check`
+
+对照 spec.md 逐条验证：
+
+- GET /hello 返回 200 + `{ "message": "你好，世界！" }` → ✅
+- Content-Type 为 application/json → ✅
+
+三维度评分：完整性 ✅ / 正确性 ✅ / 一致性 ✅
+
+### 第 5 步：`/ai:lint`
+
+代码质量审查（GSD 降级为手动）：
+
+- CRITICAL: 0
+- WARNING: 1（端口硬编码，可接受）
+- INFO: 1（package.json main 字段指向不存在的文件）
+
+综合判断：代码质量合格。
+
+---
+
+## 常见场景
+
+### 场景 1：在现有项目上加功能
+
+```
+/ai:spec add-user-auth
+/ai:plan add-user-auth
+/ai:do
+/ai:check
+/ai:lint
+```
+
+### 场景 2：修复杂 bug
+
+```
+/ai:debug "登录后白屏"
+```
+
+如果问题范围扩大：
+
+```
+/ai:spec fix-login-white-screen
+/ai:plan fix-login-white-screen
+/ai:do
+/ai:check
+/ai:lint
+```
+
+### 场景 3：中断后恢复
+
+```
+/ai:resume
+```
+
+自动读取 GSD + OpenSpec 状态，交叉对照一致性，推荐下一步。
+
+### 场景 4：复杂需求需要深入讨论
+
+```
+/ai:spec add-payment-system
+/ai:plan-full 1          ← 用 plan-full 代替 plan，走 GSD discuss + plan
+/ai:do
+/ai:check
+/ai:lint
+```
+
+### 场景 5：只做代码审查，不关心规格
+
+```
+/ai:lint
+```
+
+### 场景 6：只验证规格覆盖度，不关心代码质量
+
+```
+/ai:check
+```
+
+---
+
+## 故障排查
+
+### 命令不存在
+
+**现象**：输入 `/ai:spec` 提示命令不存在
+
+**原因**：`.claude/commands/ai/` 目录不在项目根目录下，或者 Claude Code 未重启
+
+**解决**：
+1. 确认 `.claude/commands/ai/` 在项目根目录
+2. 重启 Claude Code（命令文件在启动时加载）
+
+---
+
+### OpenSpec skill 找不到
+
+**现象**：`/ai:spec` 报错 `Unknown skill: opsx:propose`
+
+**原因**：OpenSpec 的 Claude Code skills 未安装到全局 `~/.claude/skills/`
+
+**解决**：
+```bash
+# 找到 openspec skills（通常在已安装项目的 .claude/skills/ 下）
+cp -r <项目路径>/.claude/skills/openspec-* ~/.claude/skills/
+
+# 验证
+ls ~/.claude/skills/ | grep openspec
+# 预期输出：openspec-apply-change  openspec-archive-change  openspec-explore  openspec-propose
+```
+
+重启 Claude Code 后生效。
+
+---
+
+### GSD skill 找不到
+
+**现象**：`/ai:do` 调用 `gsd-execute-phase` 时报错
+
+**原因**：GSD skills 未安装到 `~/.claude/skills/`
+
+**解决**：
+1. 确认 `ls ~/.claude/skills/ | grep gsd` 有输出
+2. 如果没有，按 [get-shit-done-cc](https://github.com/nicekid1/get-shit-done-cc) 说明安装
+
+**降级方案**：命令会自动降级为手动执行，流程不会卡住。
+
+---
+
+### `/ai:lint` 降级为手动审查
+
+**现象**：GSD code-review 因缺少 SUMMARY.md 或 git diff 而失败
+
+**原因**：GSD code-review 需要完整的 GSD 项目结构
+
+**这是正常行为**：命令会自动降级为手动逐文件审查，审查维度和分级标准相同。
+
+如果需要完整 GSD 功能：先运行 `/gsd-new-project` 初始化完整结构。
+
+---
+
+### `/ai:check` 显示未覆盖但代码已写
+
+**现象**：check 报 ❌ 但代码确实实现了
+
+**排查**：
+1. 确认代码路径与 spec 描述完全一致
+2. 确认测试覆盖了 spec 的验收标准
+3. 如果是 spec 过时（需求已变更），应先更新 spec 再 check
+
+---
+
+### 中断后恢复
+
+**现象**：会话中断，不知道做到哪了
+
+**解决**：
+```
+/ai:resume
+```
+
+自动读取 GSD + OpenSpec 状态，交叉对照一致性，推荐下一步。
+
+---
+
+### STATE.md 和实际状态不一致
+
+**现象**：`/ai:resume` 显示状态不一致警告
+
+**原因**：可能是手动修改了文件但没更新 STATE.md
+
+**解决**：
+1. 手动更新 `.planning/STATE.md` 中的状态
+2. 同步 `openspec/changes/<name>/tasks.md` 的 checkbox
+
+---
+
+## 自定义与扩展
+
+### 添加新命令
+
+在 `.claude/commands/ai/` 下新建 Markdown 文件即可。文件格式：
+
+```markdown
+---
+name: "AI: 命令名"
+description: "一句话描述"
+category: Workflow
+tags: [ai-workflow, ...]
+---
+
+# /ai:命令名 — 功能描述
+
+**输入**: `$ARGUMENTS` 为 ...
+
+---
+
+## 第 1 步：...
+
+---
+
+## 守则
+
+- 规则 1
+- 规则 2
+```
+
+### 调整执行技法
+
+`/ai:do` 中的执行技法定义在命令文件中，可以直接修改：
+
+- 添加新的技法类型
+- 调整 TDD 流程
+- 增加特定语言的检查规则
+
+### 全局 vs 项目级
+
+三个底层工具均为全局安装，所有项目共享：
+
+| 组件 | 安装位置 | 级别 | 说明 |
+|------|----------|------|------|
+| OpenSpec CLI + Skills | npm 全局 + `~/.claude/skills/openspec-*/` | 全局 | 4 个 skills + CLI |
+| GSD skills | `~/.claude/skills/gsd-*/` | 全局 | 60+ skills，状态管理与编排 |
+| Superpowers | `~/.claude/skills/superpowers/` | 全局 | 14 个子技能，TDD/调试/Brainstorm 等 |
+| /ai:* 命令 | 项目 `.claude/commands/ai/` | 项目级 | 7 个命令，统一调度入口 |
+
+### 与底层工具的关系
+
+本套命令是上层封装，底层工具全部全局安装，仍然可以直接使用：
+
+- `opsx:propose` — OpenSpec 原生命令（npm 全局）
+- `gsd-new-project` — GSD 完整项目初始化（`~/.claude/skills/gsd-*`）
+- `gsd-execute-phase` — GSD 原生执行
+- `gsd-code-review` — GSD 原生代码审查
+- `gsd-debug` — GSD 原生调试
+- Superpowers 子技能 — TDD cycle、systematic debugging 等（`~/.claude/skills/superpowers/`）
+
+如果需要更完整的 GSD 功能（如 research agents、intel 文件），可以随时补跑 `/gsd-new-project`，不会与 `/ai:*` 命令冲突。
