@@ -111,7 +111,7 @@ metadata:
 
 #### 1.7 产出：创意档案
 
-将以下内容写入项目目录 `novel-project/creative-brief.md`：
+将以下内容写入项目目录 `novels/[小说名]/creative-brief.md`：
 
 ```markdown
 # 创意档案
@@ -168,7 +168,7 @@ metadata:
 
 #### 2.1 世界观Bible
 
-写入 `novel-project/bible/world.md`：
+写入 `novels/[小说名]/bible/world.md`：
 
 ```markdown
 # 世界观设定
@@ -199,7 +199,7 @@ metadata:
 
 #### 2.2 角色卡系统
 
-每个主要角色写入 `novel-project/bible/characters/[角色名].md`：
+每个主要角色写入 `novels/[小说名]/bible/characters/[角色名].md`：
 
 ```markdown
 # [角色名]
@@ -248,7 +248,7 @@ metadata:
 
 #### 2.3 伏笔链初始化
 
-写入 `novel-project/bible/foreshadowing.md`：
+写入 `novels/[小说名]/bible/foreshadowing.md`：
 
 ```markdown
 # 伏笔链
@@ -260,7 +260,7 @@ metadata:
 
 #### 2.4 时间线初始化
 
-写入 `novel-project/bible/timeline.md`：
+写入 `novels/[小说名]/bible/timeline.md`：
 
 ```markdown
 # 时间线
@@ -278,7 +278,7 @@ metadata:
 
 #### 2.5 信息差矩阵
 
-写入 `novel-project/bible/info-gap.md`：
+写入 `novels/[小说名]/bible/info-gap.md`：
 
 ```markdown
 # 信息差矩阵
@@ -306,7 +306,7 @@ metadata:
 
 #### 3.1 总纲
 
-写入 `novel-project/outline/master.md`：
+写入 `novels/[小说名]/outline/master.md`：
 
 ```markdown
 # 总纲
@@ -334,7 +334,7 @@ metadata:
 
 #### 3.2 卷纲
 
-每卷写入 `novel-project/outline/volumes/vol-XX.md`：
+每卷写入 `novels/[小说名]/outline/volumes/vol-XX.md`：
 
 ```markdown
 # 第X卷：[卷名]
@@ -360,7 +360,7 @@ metadata:
 
 #### 3.3 章纲
 
-每章写入 `novel-project/outline/chapters/ch-XXX.md`：
+每章写入 `novels/[小说名]/outline/chapters/ch-XXX.md`：
 
 ```markdown
 # 第X章：[章节名]
@@ -534,6 +534,16 @@ metadata:
 - 终稿
 - 审校报告（列出发现的问题和修改记录）
 
+#### 5.7 审校方式
+
+| 方式 | 适用场景 | 注意事项 |
+|------|---------|---------|
+| **自审** | 短篇，或子agent失败时 | 逐章检查，参照bible/outline验证一致性。**短篇推荐此方式** |
+| **子agent审阅** | 中长篇，需要独立视角 | `delegate_task`子agent可能因会话中断而取消；如果中断超过1次，立即改用自审，不要反复重试 |
+| **用户审阅** | 最终把关 | 提供审校报告辅助用户快速定位问题 |
+
+⚠️ **子agent审阅注意**：`delegate_task`的子agent在本session被中断了4次以上。结论：**短篇审阅直接用自审，不要用delegate_task**。只有中长篇（5万字以上）才值得尝试子agent，且最多重试1次就改自审。不要反复重试delegate_task——每次失败都浪费token和时间。
+
 ---
 
 ## 网文专项：金手指与爽点
@@ -573,7 +583,7 @@ metadata:
 ## 项目文件结构
 
 ```
-novel-project/
+novels/[小说名]/
 ├── creative-brief.md           # 创意档案（探矿产出）
 ├── bible/                       # 故事圣经
 │   ├── world.md                 # 世界观
@@ -592,7 +602,7 @@ novel-project/
 │       ├── ch-001.md
 │       └── ...
 ├── chapters/                     # 章节原文
-│   ├── ch-001.md
+│   ├── ch-001.txt
 │   └── ...
 ├── summaries/                    # 章节摘要
 │   ├── ch-001-summary.md
@@ -600,6 +610,40 @@ novel-project/
 └── review/                      # 审校报告
     └── review-report.md
 ```
+
+---
+
+## 短篇模式
+
+短篇（1万字以内）不需要完整的文件结构，可以简化为：
+
+```
+novels/[小说名]/
+├── creative-brief.md           # 创意档案
+├── bible.md                    # 合并的圣经（世界观+角色+伏笔+时间线+信息差合一）
+├── outline.md                  # 合并的大纲（总纲+章纲合一）
+├── [小说名].txt                 # 正文（单文件，txt格式）
+└── review.md                   # 审校报告（可选）
+```
+
+**短篇简化规则**：
+- 项目目录以小说名命名，放在 `novels/` 下（如 `novels/遗言/`），不要用通用的 `novel-project/`
+- bible合并为单文件，用二级标题分区
+- 角色卡不必每人独立文件，合并在bible.md的"角色档案"区
+- 大纲合并为单文件，章纲用三级标题
+- 正文写在一个txt文件里，用`第X章：[章节名]`分隔（不用markdown的##标题）
+- 伏笔链可以简化为bible里的一个表格，不必独立文件
+- 审校**直接用自审**，不要用delegate_task（短篇子agent几乎必被中断）
+- 交付时生成.txt文件，不要用.md（邮件客户端收到md附件会显示为.bin）
+- 文件名用中文（如`遗言.txt`），不要用英文
+
+**短篇执笔策略**（与长篇不同）：
+- 允许一次性完成初稿，不要逐章中断
+- 初稿完成后，整体进入审校阶段统一检查
+- 角色日记法、风格锚定文本等长篇准备步骤可跳过
+- 大纲验证精简为3项核心检查：特定性测试、伏笔覆盖、角色弧线
+- 精修策略：不机械删减10%，而是标注冗余段落（解释性文字、AI套话、过度描写）定向精简
+- 信息差校验：写完后自审逐角色检查"是否知道不该知道的"，不需要每章更新矩阵
 
 ---
 
@@ -627,6 +671,28 @@ novel-project/
 ```
 sync → 加载creative-brief/bible/outline → 创作工作 → 更新bible/summary → handoff
 ```
+
+---
+
+## 交付与分享
+
+小说完成后，需要将成果交付给用户：
+
+| 平台 | 文件发送方式 |
+|------|------------|
+| Telegram/Discord/Matrix | `MEDIA:/path/to/file.md` 直接发送文件 |
+| Signal/Weixin/Feishu/Yuanbao | `MEDIA:` 支持文件发送 |
+| **QQ** | ❌ 不支持文件发送，只能贴纯文本 |
+| 邮件 | 用 `send-email` skill 发送附件，多文件可压缩为zip |
+
+**小说交付格式**：
+- 正文文件统一生成 `.txt` 格式（不要用 `.md`，QQ邮箱等客户端收到md会显示为.bin）
+- 文件名使用中文（如 `遗言.txt`），不用英文文件名
+
+**QQ平台替代方案**：
+1. 用邮件发送txt附件（推荐，需配置SMTP环境变量）
+2. 贴纯文本（适合极短内容）
+3. 推送到GitHub仓库，给用户链接
 
 ---
 
