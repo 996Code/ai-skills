@@ -35,7 +35,7 @@
 2. GSD code-review 需要完整 GSD 结构（SUMMARY.md 等）才能跑 → `/ai:lint` 降级为手动审查
 3. GSD discuss-phase 会幻觉发散问无关问题 → 在 `/ai:plan` 中注入约束限制
 
-## 下午工作（蛋蛋）
+## 上午工作（蛋蛋）
 
 ### 提交记录
 
