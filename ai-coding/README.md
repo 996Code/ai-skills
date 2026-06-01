@@ -6,13 +6,12 @@
 
 ```
 ai-coding/
-├── commands/          # /ai:* 斜杠命令（7 个）
+├── commands/          # /ai:* 斜杠命令（6 个）
 │   ├── spec.md        # 需求定义
-│   ├── plan.md        # 完整规划
-│   ├── do.md          # 执行任务
+│   ├── plan.md        # 完整规划（discuss + plan 全量）
+│   ├── do.md          # 执行任务（含 Plan-Task 同步检查）
 │   ├── debug.md       # 系统化调试
-│   ├── check.md       # 规格覆盖度验证
-│   ├── lint.md        # 代码质量审查
+│   ├── check.md       # 全面审查（规格覆盖 + 代码质量 + 安全 + 测试）
 │   └── resume.md      # 恢复上下文
 ├── docs/
 │   └── AI_WORKFLOW_GUIDE.md   # 完整使用手册
@@ -38,8 +37,9 @@ ai-coding/
 ## 流程
 
 ```
-/ai:spec → /ai:plan → /ai:do → /ai:check → /ai:lint
-  定义需求   完整规划   执行实现   验证覆盖   审查质量
+/ai:spec → /ai:plan → /ai:do → /ai:check
+  定义需求   完整规划   执行实现   全面审查
+                              （覆盖+质量+安全+测试）
 ```
 
 ## 许可
