@@ -135,5 +135,5 @@ fi
 - [x] Task 1: ...
 - [ ] Task 2: ... (pending)
 
-**下一步**: 有 pending → /ai:do；全部完成 → /ai:check；遇到 bug → /ai:debug
+**下一步**: 有 pending → /ai:do；全部完成 → /ai:check 全面审查；遇到 bug → /ai:debug
 ```
