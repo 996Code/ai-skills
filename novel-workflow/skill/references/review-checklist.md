@@ -115,3 +115,4 @@
 9. ✅ 比喻/意象去重——同一比喻10章内不重复
 10. ✅ 五感覆盖——每章至少3种感官，后半部不衰减
 11. ✅ 情绪曲线——无连续3章平坦/无连续4章高压
+12. ✅ 多agent逐行审查——新写/重写≥3章时，推送前必须启动4个并行agent逐行扫描（typo/unclear/dangling/logic/viewpoint），typo和logic全修，unclear/dangling修≥60%
