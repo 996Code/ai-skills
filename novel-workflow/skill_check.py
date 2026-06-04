@@ -51,6 +51,14 @@ def check(filepath):
     tension_words = ['红', '呼吸', '近', '碰到', '烫', '心跳', '心跳漏']
     tension_found = [t for t in tension_words if t in text]
 
+    # 7. 擦边锚点部位检查（核心！女主出场章节必须有）
+    # 苏晚晴(温柔型擦边): 胸/腰/腿/臀 + 锁骨/颈/耳尖
+    swq_eroti = ['胸', '腰', '腿', '臀', '胸线', '腰线', '腰侧', '小腿', '大腿', '裙摆', '轮廓']
+    swq_eroti_found = [a for a in swq_eroti if a in text]
+    # 叶霜(冰山型擦边): 胸/腰/腿/臀 + 小臂/后颈/指尖
+    ys_eroti = ['胸', '腰', '腿', '臀', '胸线', '腰线', '腰侧', '小腿', '大腿', '裤管', '脚踝', '绷']
+    ys_eroti_found = [a for a in ys_eroti if a in text]
+
     # 输出
     print(f'\n📋 SKILL检查: {name}')
     print(f'━' * 40)
@@ -61,6 +69,8 @@ def check(filepath):
     print(f'苏晚晴锚点: {swq_found if swq_found else "❌ 缺失"}')
     print(f'叶霜锚点: {ys_found if ys_found else "❌ 缺失"}')
     print(f'暧昧张力词: {tension_found if tension_found else "❌ 缺失"}')
+    print(f'苏晚晴擦边部位: {swq_eroti_found if swq_eroti_found else "❌ 缺失(胸/腰/腿/臀)"}')
+    print(f'叶霜擦边部位: {ys_eroti_found if ys_eroti_found else "❌ 缺失(胸/腰/腿/臀)"}')
     print(f'━' * 40)
 
     # 综合判定
@@ -75,6 +85,8 @@ def check(filepath):
     if has_swq and not swq_found: issues.append('苏晚晴出场但无身材锚点')
     if has_ys and not ys_found: issues.append('叶霜出场但无身材锚点')
     if (has_swq or has_ys) and not tension_found: issues.append('女主出场但无暧昧张力')
+    if has_swq and not swq_eroti_found: issues.append('苏晚晴出场但无擦边部位(胸/腰/腿/臀)')
+    if has_ys and not ys_eroti_found: issues.append('叶霜出场但无擦边部位(胸/腰/腿/臀)')
 
     if issues:
         print(f'❌ 不合格: {"; ".join(issues)}')
