@@ -5,7 +5,7 @@
 
 ## 使用时机
 
-- 每写完 3 章做一次轻量检查（`python3 novel_check.py --slide`）
+- 每写完 3 章做一次轻量检查（`python3 scripts/novel_check.py --slide`）
 - 批量交付前做一次完整检查（逐项过本清单）
 - 审校阶段必做
 
@@ -167,7 +167,7 @@ grep -rn '苏晚晴\|叶霜\|秦岚\|沈灵' text/ | head -5
 
 ## 自动化检查
 
-以上部分项已由 `novel_check.py --slide` 自动覆盖：
+以上部分项已由 `scripts/novel_check.py --slide` 自动覆盖：
 
 | 自动检查项 | 窗口大小 |
 |-----------|---------|
