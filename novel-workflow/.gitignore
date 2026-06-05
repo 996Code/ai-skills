@@ -2,3 +2,4 @@
 .env.*
 *.secret
 .DS_Store
+.claude/logs/
