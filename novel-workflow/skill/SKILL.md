@@ -345,11 +345,23 @@ metadata:
 4. **信息差矩阵** → `novels/芯觉醒/planning/bible/info-gap.md`（有新揭示时更新）
 5. **角色状态** → 重大变化时更新对应角色卡 `novels/芯觉醒/planning/bible/characters/[角色名].md`
 
-**⚠️ 铁律：写完必须跑全量检查**：
+**⚠️ 铁律：写完必须跑全量检查，exit code != 0 禁止进入下一章**：
+
+每章写完后，按顺序执行（不可跳过任何步骤）：
+
+① 正文验证：
+```bash
+python3 scripts/count_words.py [文件路径]
+python3 scripts/novel_check.py --single [文件路径]
+```
+② 补流程文档（摘要→5视角审查→review→timeline→foreshadowing）
+③ 全量检查：
 ```bash
 python3 scripts/novel_check.py    # 默认全量（正文+滑动+流程文档）
 ```
-exit code != 0 = 未完成，不能进入下一章。post-write hook 会自动跑 `--quick` 做快速检查。
+④ exit code == 0 → 下一章。exit code != 0 → 修复问题，重跑③，直到通过。
+
+**禁止在未通过全检的情况下连续写多章**。Hook 输出仅作辅助提醒，不可依赖——agent 必须在写完每章后主动运行全检并等待结果。批量写完后补文档是不可接受的。
 
 #### 4.6 章节审查
 
