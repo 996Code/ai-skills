@@ -884,11 +884,22 @@
 
       try {
         const json = JSON.parse(text);
-        if (json.code === 0 || json.success || json.code === 200) {
+        // ★ 检查真正的成功：code=200 且 soldOut 不为 true 且有 payAmount
+        const soldOut = json.data?.soldOut === true;
+        const hasPayAmount = json.data?.payAmount != null;
+        const codeOk = json.code === 0 || json.success || json.code === 200;
+
+        if (codeOk && !soldOut && hasPayAmount) {
           log(`[FastPath] 🎉🎉🎉 订单创建成功！`);
           return true;
         }
-        log(`[FastPath] 服务端: code=${json.code}, msg=${json.msg || ''}`);
+        if (soldOut) {
+          log(`[FastPath] 产品已售罄 (code=${json.code})`);
+        } else if (codeOk) {
+          log(`[FastPath] 预览成功但无金额 (code=${json.code}, soldOut=${soldOut})`);
+        } else {
+          log(`[FastPath] 服务端: code=${json.code}, msg=${json.msg || ''}`);
+        }
       } catch {
         log(`[FastPath] 响应非 JSON`);
       }
@@ -1290,16 +1301,7 @@
     log(`[抢购] 🚀 启动抢购流程 (${poolInfo})`);
     updateStatus('🚀 抢购中...');
 
-    // FastPath 轰炸（可选，直接调 API 作为补充）
-    if (poolAvailable() > 0 && tokenPool.previewTemplate) {
-      log('[抢购] 先 FastPath 轰炸一轮...');
-      const blastSuccess = await startPurchaseBlast();
-      if (blastSuccess) {
-        _usePoolTicketMode = false;
-        stopWatching({ statusText: '🎉 抢购成功！(FastPath)', logMessage: 'FastPath 成功，请完成支付' });
-        return;
-      }
-    }
+    // 直接走全页面流程（不跑 FastPath 轰炸，因为 FastPath 不会渲染支付弹窗）
 
     // 全页面流程（点按钮 → TC → 池 ticket/OCR → preview → 渲染支付弹窗）
     log('[抢购] 开始全页面流程');
