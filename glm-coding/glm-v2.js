@@ -507,18 +507,21 @@
   }
 
   // 单次生成 ticket（含验证码刷新重试）
+  // ★ 优化：不等 ticketPromise，验证码消失即视为成功，回调异步存池
   async function generateOneTicket() {
     try {
-      // 1. 创建 TC 实例 → 弹出验证码
+      // 1. 创建 TC 实例 → 弹出验证码（回调会异步 poolAdd）
       const ticketPromise = createCaptchaInstance();
+      // 不 await！回调自动存池，错误静默处理
+      ticketPromise.catch(() => {});
 
       // 2. 循环尝试 OCR（验证码可能刷新多次）
       let solved = false;
       for (let attempt = 0; attempt < 5; attempt++) {
-        // 等验证码出现
+        // 等验证码出现（快速轮询）
         const start = Date.now();
-        while (Date.now() - start < 10000 && !isCaptchaVisible()) {
-          await sleep(200);
+        while (Date.now() - start < 8000 && !isCaptchaVisible()) {
+          await sleep(100);
         }
         if (!isCaptchaVisible()) {
           log(`[生成器] 验证码未弹出 (尝试 ${attempt + 1})`);
@@ -530,20 +533,22 @@
         if (!ok) {
           log(`[生成器] OCR 识别失败 (尝试 ${attempt + 1})`);
           capturedCaptchaImage = null;
-          await sleep(500);
+          await sleep(300);
           continue;
         }
 
-        // 等待 SDK 验证结果
-        await sleep(3000);
+        // ★ 轮询等待验证结果（替代固定 sleep(3000)，成功时更快）
+        for (let i = 0; i < 20; i++) {
+          if (!isCaptchaVisible()) break;
+          await sleep(200);
+        }
 
-        // 验证码消失了 = 验证成功，TC 回调即将触发
         if (!isCaptchaVisible()) {
           solved = true;
           break;
         }
 
-        // 验证码还在 = 验证失败，SDK 刷新了新验证码，继续尝试
+        // 验证码还在 = 验证失败，SDK 刷新了新验证码
         log(`[生成器] 验证失败，验证码已刷新 (第 ${attempt + 1} 次)`);
         capturedCaptchaImage = null;
       }
@@ -553,20 +558,14 @@
         return false;
       }
 
-      // 3. 等 TC 回调完成（ticket 已在回调中存入池子）
-      // ticketPromise 内部有 20s 超时，不会卡死
-      try {
-        await ticketPromise;
-        return true;
-      } catch (e) {
-        log(`[生成器] TC 回调失败: ${e.message}`);
-        return false;
-      }
+      // 验证码消失 = TC SDK 已调回调 → ticket 已异步存入池子
+      // 短暂等一下确保 poolAdd 完成
+      await sleep(300);
+      return true;
     } catch (e) {
       log(`[生成器] 异常: ${e.message}`);
       return false;
     } finally {
-      // 清理验证码残留
       closeCaptcha();
       capturedCaptchaImage = null;
     }
@@ -594,7 +593,7 @@
         successCount++;
         failStreak = 0;
         updateStatus(`生成中 ${poolAvailable()}/${target} ✅${successCount}`);
-        await sleep(1000);
+        await sleep(300); // ★ 极短冷却，尽快开下一轮
       } else {
         failStreak++;
         if (failStreak >= 5) {
@@ -1617,8 +1616,8 @@
         return;
       }
 
-      // 测试计划：每个时间点生成一个 ticket，等待后只测一次
-      const testPoints = [0, 60, 120, 180, 240, 300, 420]; // 秒
+      // 测试计划：加密 3~5 分钟区间，精确定位过期边界
+      const testPoints = [0, 60, 120, 180, 210, 240, 270, 300]; // 秒
       const results = [];
 
       for (let i = 0; i < testPoints.length; i++) {
