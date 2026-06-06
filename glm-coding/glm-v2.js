@@ -26,7 +26,7 @@
   // ==========================================
 
   const POOL_TARGET_SIZE = 500;                  // 池子目标大小
-  const TICKET_MAX_AGE_MS = 3 * 60 * 1000;      // ticket 有效期 ~3~5 分钟，保守设 3 分钟
+  const TICKET_MAX_AGE_MS = 5 * 60 * 1000;      // ticket 有效期实测 >5 分钟，保守设 5 分钟
   const STORAGE_KEY = 'glm-v2-config';
   const POOL_STORAGE_KEY = 'glm-v2-pool';
   const WATCH_GRACE_MS = 40 * 60 * 1000;        // 抢购窗口：目标时间后 40 分钟
@@ -1501,9 +1501,6 @@
           <button class="v2-btn danger" id="glm-v2-clear-pool" style="flex:0.5;font-size:11px" type="button">清空池</button>
           <button class="v2-btn secondary" id="glm-v2-test-fastpath" style="flex:0.5;font-size:11px" type="button">测试FP</button>
         </div>
-        <div style="display:flex;gap:8px;margin-top:8px">
-          <button class="v2-btn secondary" id="glm-v2-test-ttl" style="flex:1;font-size:11px" type="button">⏱️测有效期</button>
-        </div>
         <div class="v2-log" id="glm-v2-log"></div>
       </div>`;
     document.body.appendChild(panel);
@@ -1624,115 +1621,6 @@
       } else {
         log('[测试] ❌ 未检测到支付弹窗');
         updateStatus('测试: 未出现弹窗');
-      }
-    });
-
-    // ⏱️ 测 ticket 有效期：生成多个 ticket，每个在不同延迟后只测一次，找出真实 TTL
-    document.getElementById('glm-v2-test-ttl').addEventListener('click', async () => {
-      log('[TTL] ⏱️ 开始 ticket 有效期测试（每个 ticket 只用一次）');
-      updateStatus('TTL 测试中...');
-
-      if (!tokenPool.previewTemplate) {
-        log('[TTL] ❌ 无 preview 模板，请先通过页面手动购买一次来捕获');
-        updateStatus('TTL: 无模板');
-        return;
-      }
-
-      // 测试计划：加密 3~5 分钟区间，精确定位过期边界
-      const testPoints = [0, 60, 120, 180, 210, 240, 270, 300]; // 秒
-      const results = [];
-
-      for (let i = 0; i < testPoints.length; i++) {
-        const delaySec = testPoints[i];
-        log(`[TTL] [${i + 1}/${testPoints.length}] 生成 ticket (目标延迟 ${delaySec}s)...`);
-        updateStatus(`TTL: 生成中 ${i + 1}/${testPoints.length}`);
-
-        // 生成一个 ticket
-        const ok = await generateOneTicket();
-        if (!ok) {
-          log(`[TTL] [${i + 1}] ❌ 生成失败，跳过`);
-          continue;
-        }
-
-        // 取出刚生成的 ticket
-        const now = Date.now();
-        const fresh = tokenPool.tickets
-          .filter(t => !t.used && now - t.ts < TICKET_MAX_AGE_MS)
-          .sort((a, b) => b.ts - a.ts);
-        if (!fresh.length) {
-          log(`[TTL] [${i + 1}] ❌ 无可用 ticket，跳过`);
-          continue;
-        }
-        const ticket = fresh[0];
-        ticket.used = true;
-        poolSave();
-
-        // 等待目标延迟
-        if (delaySec > 0) {
-          log(`[TTL] [${i + 1}] 等待 ${delaySec}s 后测试...`);
-          updateStatus(`TTL: 等待 ${delaySec}s (${i + 1}/${testPoints.length})`);
-          await sleep(delaySec * 1000);
-        }
-
-        // 只测一次
-        const elapsed = Math.round((Date.now() - ticket.ts) / 1000);
-        log(`[TTL] [${i + 1}] ⏱️ ${elapsed}s → 测试...`);
-
-        try {
-          const tpl = tokenPool.previewTemplate;
-          let bodyObj = {};
-          try { bodyObj = JSON.parse(tpl.bodyTemplate); } catch {}
-          bodyObj.ticket = ticket.ticket;
-          if (ticket.randstr) bodyObj.randstr = ticket.randstr;
-
-          const headers = { ...(tpl.headers || {}), 'Content-Type': 'application/json' };
-          const resp = await originalFetch.call(realWindow, tpl.url, {
-            method: 'POST', headers, body: JSON.stringify(bodyObj)
-          });
-          const text = await resp.text();
-
-          let success = false;
-          let msg = '';
-          try {
-            const json = JSON.parse(text);
-            msg = `code=${json.code} msg=${json.msg || ''}`;
-            if (json.code === 0 || json.success || json.code === 200) success = true;
-          } catch {
-            msg = text.substring(0, 100);
-          }
-
-          results.push({ delay: elapsed, ok: success, msg });
-          log(`[TTL] [${i + 1}] ${success ? '✅' : '❌'} ${elapsed}s → ${msg}`);
-        } catch (e) {
-          results.push({ delay: elapsed, ok: false, msg: e.message });
-          log(`[TTL] [${i + 1}] ❌ ${elapsed}s → 异常: ${e.message}`);
-        }
-
-        // 每轮之间短暂冷却
-        if (i < testPoints.length - 1) await sleep(2000);
-      }
-
-      // 汇总
-      log('[TTL] ──────── 汇总 ────────');
-      for (const r of results) {
-        log(`[TTL]   ${r.delay}s → ${r.ok ? '✅ 有效' : '❌ 失效'} (${r.msg})`);
-      }
-
-      const validDelays = results.filter(r => r.ok).map(r => r.delay);
-      const invalidDelays = results.filter(r => !r.ok).map(r => r.delay);
-
-      if (validDelays.length > 0 && invalidDelays.length > 0) {
-        const maxValid = Math.max(...validDelays);
-        const minInvalid = Math.min(...invalidDelays);
-        log(`[TTL] 📊 有效期: ${maxValid}s ~ ${minInvalid}s (${Math.round(maxValid/60)}~${Math.round(minInvalid/60)} 分钟)`);
-        updateStatus(`TTL: ${maxValid}~${minInvalid}s`);
-      } else if (validDelays.length === results.length) {
-        const max = Math.max(...validDelays);
-        log(`[TTL] 📊 全部有效！至少 ${max}s (>${Math.round(max/60)} 分钟)`);
-        updateStatus(`TTL: >${max}s`);
-      } else if (invalidDelays.length === results.length) {
-        log(`[TTL] 📊 全部失效（ticket 可能不适用于此 API）`);
-        updateStatus('TTL: 全部失效');
       }
     });
   }
