@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GLM Coding 抢购助手 v2.0 (Token 预热池版)
+// @name         GLM Coding 抢购助手 v2.1 (Token 池版)
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  准点自动抢购 + Token预热池 + 验证码自动识别 + 绕过限流 + 弹窗闭环重试
+// @version      2.1
+// @description  Token预生成池 + 准点轰炸 + 验证码自动识别 + 降级正常流程
 // @author       GLM-Grabber
 // @match        *://bigmodel.cn/glm-coding*
 // @match        https://www.bigmodel.cn/glm-coding
@@ -25,18 +25,17 @@
   // 1. 常量与配置
   // ==========================================
 
-  const WARMUP_BEFORE_MS = 5 * 60 * 1000;    // 开售前5分钟开始预热
-  const TICKET_MAX_AGE_MS = 8 * 60 * 1000;   // ticket 最大有效期 8 分钟
-  const POOL_TARGET_SIZE = 300;                // 池子目标大小
-  const WARMUP_COOLDOWN_MS = 3000;            // 预热每次冷却 3 秒
-
+  const POOL_TARGET_SIZE = 500;                  // 池子目标大小
+  const TICKET_MAX_AGE_MS = 3 * 60 * 1000;      // ticket 有效期 ~3~5 分钟，保守设 3 分钟
   const STORAGE_KEY = 'glm-v2-config';
   const POOL_STORAGE_KEY = 'glm-v2-pool';
-  const WATCH_GRACE_MS = 40 * 60 * 1000;
+  const WATCH_GRACE_MS = 40 * 60 * 1000;        // 抢购窗口：目标时间后 40 分钟
   const CYCLE_SETTLE_MS = 350;
   const SECOND_CLICK_DELAY_MS = 120;
   const DIALOG_RETRY_BASE_DELAY_MS = 350;
   const DIALOG_RETRY_RANDOM_MS = 300;
+  const MAX_RETRY_COUNT = 300;
+  const NO_CAPTCHA_RESET = 3;
 
   const PRODUCT_MAP = {
     Lite: { month: 'product-02434c', quarter: 'product-b8ea38', year: 'product-70a804' },
@@ -58,7 +57,9 @@
 
   let config = loadConfig();
   let tickTimer = null;
-  let isWatching = false;
+  let isWatching = false;         // 倒计时监听中
+  let isPurchasing = false;       // 抢购流程已启动（FastPath 或正常流程）
+  let isNormalFlow = false;       // 已降级到正常页面流程
   let isWaitingCaptcha = false;
   let isClicking = false;
   let hasCompleted = false;
@@ -67,15 +68,14 @@
   let lastStatusText = '';
   let lastRenderedStatusText = '';
   let retryCount = 0;
-  const MAX_RETRY_COUNT = 300;
-  let noCaptchaStreak = 0;        // 连续点击无验证码计数
-  const NO_CAPTCHA_RESET = 3;     // 连续 N 次无验证码则尝试复位
+  let noCaptchaStreak = 0;
 
-  // Token 池相关
-  let isWarmupMode = false;
-  let lastWarmupClickAt = 0;
+  // Token 池
   let tokenPool = { tickets: [], previewTemplate: null };
   let capturedCaptchaImage = null;
+
+  // ★ 池 ticket 注入模式：抢购时为 true，TC 回调会自动用池中 ticket 替代验证码结果
+  let _usePoolTicketMode = false;
 
   // 真实 window
   const realWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -105,28 +105,13 @@
     } catch (e) {}
   }
 
-  function poolAdd(ticket, randstr, previewBody, previewHeaders, previewUrl) {
-    // 存储预览请求模板（只需要一次）
-    if (!tokenPool.previewTemplate && previewBody) {
-      tokenPool.previewTemplate = {
-        url: previewUrl,
-        method: 'POST',
-        headers: previewHeaders,
-        bodyTemplate: previewBody
-      };
-      log(`[Pool] 已捕获 preview 请求模板`);
-    }
-
-    // 存储 ticket
+  function poolAdd(ticket, randstr, source = 'generator') {
+    if (tokenPool.tickets.some(t => t.ticket === ticket)) return; // 去重
     tokenPool.tickets.push({
-      ticket,
-      randstr: randstr || '',
-      ts: Date.now(),
-      used: false
+      ticket, randstr: randstr || '', ts: Date.now(), used: false, source
     });
-
     poolSave();
-    log(`[Pool] ✅ 捕获 ticket #${tokenPool.tickets.length}，池中 ${poolAvailable()} 个可用`);
+    log(`[Pool] ✅ +1 ticket，池中 ${poolAvailable()} 个可用`);
   }
 
   function poolConsume() {
@@ -148,13 +133,12 @@
 
   function poolClear() {
     tokenPool.tickets = [];
-    tokenPool.previewTemplate = null;
     poolSave();
     log('[Pool] 已清空');
   }
 
   // ==========================================
-  // 4. 网络拦截层（增强版）
+  // 4. 网络拦截层
   // ==========================================
 
   const originalFetch = window.fetch;
@@ -170,61 +154,22 @@
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
 
-    // ② ★ Token 池核心：拦截 preview 请求，捕获 ticket ★
-    if (requestUrl.includes('/api/biz/pay/preview')) {
-      const body = init?.body;
-
-      if (isWarmupMode && body) {
-        // 预热模式：捕获 ticket + 阻止 preview 执行（ticket 未被消耗）
-        try {
-          let bodyStr = typeof body === 'string' ? body : '';
-          let bodyObj = {};
-          try { bodyObj = JSON.parse(bodyStr); } catch {
-            // 可能是 FormData 或其他格式
-            log(`[Pool] preview body 非 JSON: ${typeof body}`);
-          }
-
-          // 提取 ticket 和 randstr
-          const ticket = bodyObj.ticket || bodyObj.captchaTicket || bodyObj.captcha_ticket || null;
-          const randstr = bodyObj.randstr || bodyObj.captchaRandstr || bodyObj.rand_str || '';
-
-          if (ticket) {
-            poolAdd(ticket, randstr, bodyStr, init?.headers, requestUrl);
-
-            // 阻止 preview 执行：返回模拟"繁忙"的响应
-            log(`[Pool] 预热模式：阻止 preview，ticket 已存入池中`);
-            return new Response(JSON.stringify({
-              code: -1,
-              msg: '购买人数较多，请稍后再试',
-              data: null,
-              success: false
-            }), { status: 200, headers: { 'content-type': 'application/json' } });
-          } else {
-            log(`[Pool] preview body 中未找到 ticket 字段: ${bodyStr.substring(0, 200)}`);
-          }
-        } catch (e) {
-          log(`[Pool] 捕获 preview 异常: ${e.message}`);
+    // ② 被动捕获 preview 请求模板（用于 FastPath，仅捕获一次）
+    if (requestUrl.includes('/api/biz/pay/preview') && init?.body && !tokenPool.previewTemplate) {
+      try {
+        const bodyStr = typeof init.body === 'string' ? init.body : '';
+        if (bodyStr) {
+          tokenPool.previewTemplate = {
+            url: requestUrl,
+            method: 'POST',
+            headers: init.headers || {},
+            bodyTemplate: bodyStr
+          };
+          log(`[Pool] 已捕获 preview 请求模板 (fetch)`);
+          poolSave();
         }
-      }
-
-      // 非预热模式：正常放行，但记录请求格式（用于调试）
-      if (!isWarmupMode && body) {
-        try {
-          const bodyStr = typeof body === 'string' ? body : '';
-          if (!tokenPool.previewTemplate) {
-            // 第一次看到 preview 请求，即使不是预热模式也捕获模板
-            const bodyObj = JSON.parse(bodyStr);
-            if (bodyObj) {
-              tokenPool.previewTemplate = {
-                url: requestUrl,
-                method: 'POST',
-                headers: init?.headers,
-                bodyTemplate: bodyStr
-              };
-              log(`[Pool] 已捕获 preview 请求模板 (非预热模式)`);
-            }
-          }
-        } catch {}
+      } catch (e) {
+        log(`[Pool] 捕获模板异常: ${e.message}`);
       }
     }
 
@@ -252,7 +197,7 @@
     return response;
   };
 
-  // XHR 拦截（同样增强 preview 捕获）
+  // XHR 拦截
   const originalXHROpen = XMLHttpRequest.prototype.open;
   const originalXHRSend = XMLHttpRequest.prototype.send;
   const originalXHRSetHeader = XMLHttpRequest.prototype.setRequestHeader;
@@ -270,52 +215,30 @@
     this._capturedHeaders = {};
     return originalXHROpen.call(this, method, url, ...rest);
   };
+
   XMLHttpRequest.prototype.send = function (body) {
     const self = this;
 
-    // ★ 拦截 XHR 方式的 preview 请求
-    if (self._reqUrl && self._reqUrl.includes('/api/biz/pay/preview') && isWarmupMode && body) {
+    // ★ 被动捕获 preview 请求模板（含完整请求头，比 fetch 更完整）
+    if (self._reqUrl && self._reqUrl.includes('/api/biz/pay/preview') && body && !tokenPool.previewTemplate) {
       try {
-        let bodyStr = typeof body === 'string' ? body : '';
-        let bodyObj = {};
-        try { bodyObj = JSON.parse(bodyStr); } catch {}
-
-        const ticket = bodyObj.ticket || bodyObj.captchaTicket || bodyObj.captcha_ticket || null;
-        const randstr = bodyObj.randstr || bodyObj.captchaRandstr || bodyObj.rand_str || '';
-
-        if (ticket) {
-          poolAdd(ticket, randstr, bodyStr, self._capturedHeaders || null, self._reqUrl);
-
-          // 模拟成功加载，但替换响应内容为"繁忙"
-          Object.defineProperty(self, 'readyState', { writable: true, value: 4 });
-          Object.defineProperty(self, 'status', { writable: true, value: 200 });
-          Object.defineProperty(self, 'responseText', {
-            writable: true,
-            value: JSON.stringify({ code: -1, msg: 'warmup_blocked', data: null, success: false })
-          });
-          Object.defineProperty(self, 'response', {
-            writable: true,
-            value: { code: -1, msg: 'warmup_blocked', data: null, success: false }
-          });
-
-          // 触发 readystatechange
-          setTimeout(() => {
-            if (typeof self.onreadystatechange === 'function') {
-              self.onreadystatechange(new Event('readystatechange'));
-            }
-            self.dispatchEvent(new Event('readystatechange'));
-            self.dispatchEvent(new Event('load'));
-          }, 50);
-
-          log(`[Pool] 预热模式(XHR)：阻止 preview，ticket 已存入`);
-          return; // 不调用 originalXHRSend
+        const bodyStr = typeof body === 'string' ? body : '';
+        if (bodyStr) {
+          tokenPool.previewTemplate = {
+            url: self._reqUrl,
+            method: 'POST',
+            headers: self._capturedHeaders || {},
+            bodyTemplate: bodyStr
+          };
+          log(`[Pool] 已捕获 preview 请求模板 (XHR, 含完整 headers)`);
+          poolSave();
         }
       } catch (e) {
-        log(`[Pool] XHR 捕获异常: ${e.message}`);
+        log(`[Pool] XHR 捕获模板异常: ${e.message}`);
       }
     }
 
-    // 正常 XHR：拦截售罄数据
+    // 拦截售罄
     self.addEventListener('readystatechange', function () {
       if (this.readyState === 4 && this.status === 200) {
         const contentType = this.getResponseHeader('content-type') || '';
@@ -358,7 +281,7 @@
     return originalReplaceState.apply(this, args);
   };
 
-  // ★ 拦截 TencentCaptcha 构造函数，捕获 ticket 回调
+  // ★ TencentCaptcha 拦截（日志 + 池 ticket 注入）
   try {
     let _origTC = null;
     Object.defineProperty(realWindow, 'TencentCaptcha', {
@@ -366,23 +289,26 @@
       set(val) {
         if (typeof val !== 'function') { _origTC = val; return; }
         _origTC = function (appId, callback, options) {
-          log(`[Pool] 拦截 TencentCaptcha 构造, appId=${appId}`);
+          log(`[TC] TencentCaptcha 构造, appId=${appId}, poolMode=${_usePoolTicketMode}`);
           const wrappedCallback = function (res) {
-            if (res && res.ret === 0 && res.ticket) {
-              log(`[Pool] TencentCaptcha 回调: ticket=${res.ticket.substring(0, 20)}...`);
-              // 存入池子（还没被 preview 使用）
-              // 注意：这里先存入，后续当 preview 被拦截时会再次存入（去重）
-              tokenPool.tickets.push({
-                ticket: res.ticket,
-                randstr: res.randstr || '',
-                ts: Date.now(),
-                used: false,
-                source: 'tc_callback'
-              });
-              poolSave();
+            // ★ 抢购模式 + 池中有 ticket → 用池中 ticket 替代 TC 验证结果
+            // 这样页面收到的就是有效的 ticket，继续走 preview → 渲染支付弹窗
+            if (_usePoolTicketMode && poolAvailable() > 0) {
+              const ticketInfo = poolConsume();
+              if (ticketInfo) {
+                log(`[TC] ★ 注入池 ticket，跳过验证码 (剩余 ${poolAvailable()})`);
+                if (typeof callback === 'function') {
+                  callback({ ret: 0, ticket: ticketInfo.ticket, randstr: ticketInfo.randstr });
+                }
+                return;
+              }
             }
-            // ★ 始终调用原始回调（预热模式下也让页面走到 preview）
-            // preview 层的 fetch/XHR 拦截器会负责捕获 ticket + 阻止请求
+            // 正常路径：透传 TC 验证结果
+            if (res && res.ret === 0 && res.ticket) {
+              log(`[TC] 回调成功: ticket=${res.ticket.substring(0, 20)}...`);
+            } else if (res) {
+              log(`[TC] 回调: ret=${res.ret}`);
+            }
             if (typeof callback === 'function') callback(res);
           };
           return new val(appId, wrappedCallback, options);
@@ -393,7 +319,7 @@
     });
     log('[GLM-v2] TencentCaptcha 拦截器已注册');
   } catch (e) {
-    log('[GLM-v2] TencentCaptcha 拦截注册失败: ' + e.message);
+    log('[GLM-v2] TencentCaptcha 拦截失败: ' + e.message);
   }
 
   console.log('[GLM-v2] 网络拦截器已注册');
@@ -401,15 +327,6 @@
   // ==========================================
   // 5. 验证码图片拦截层
   // ==========================================
-
-  const po = new PerformanceObserver((list) => {
-    for (const entry of list.getEntries()) {
-      if (entry.name && (entry.name.includes('captcha') || entry.name.includes('tencent') || entry.name.includes('verify'))) {
-        console.log('[GLM-v2] 验证码图片请求:', entry.name.substring(0, 80));
-      }
-    }
-  });
-  try { po.observe({ type: 'resource', buffered: false }); } catch (e) {}
 
   const OriginalImage = window.Image;
   window.Image = function (...args) {
@@ -427,7 +344,7 @@
               canvas.width = img.naturalWidth;
               canvas.height = img.naturalHeight;
               canvas.getContext('2d').drawImage(img, 0, 0);
-              const base64 = canvas.toDataURL('image/png'); // 用 PNG 无损
+              const base64 = canvas.toDataURL('image/png');
               capturedCaptchaImage = { src: val, base64, width: img.naturalWidth, height: img.naturalHeight };
             } catch (e) {
               capturedCaptchaImage = { src: val, base64: null, width: img.naturalWidth, height: img.naturalHeight };
@@ -542,11 +459,173 @@
 
   function updatePoolStatus() {
     const el = document.getElementById('glm-v2-pool-count');
-    if (el) el.textContent = `${poolAvailable()} 个 ticket 可用`;
+    if (el) el.textContent = `🎟️ ${poolAvailable()} 个 ticket 可用`;
   }
 
   // ==========================================
-  // 7. 验证码识别
+  // 7. 独立 Ticket 生成器
+  // ==========================================
+
+  let ticketGeneratorRunning = false;
+
+  // 创建独立 TC 实例（不走页面购买按钮）
+  function createCaptchaInstance() {
+    return new Promise((resolve, reject) => {
+      const TC = realWindow.TencentCaptcha;
+      if (!TC) { reject(new Error('TencentCaptcha SDK 未加载')); return; }
+
+      let settled = false;
+
+      const callback = function (res) {
+        if (settled) return; // 防止超时后重复回调
+        settled = true;
+        if (res.ret === 0 && res.ticket) {
+          // 直接存入池子 — ticket 未被任何 preview 消耗
+          poolAdd(res.ticket, res.randstr || '', 'generator');
+          resolve(res);
+        } else {
+          reject(new Error(`验证码回调 ret=${res.ret}`));
+        }
+      };
+
+      const instance = new TC('196026326', callback, {
+        mode: 'bind',
+        type: 'popup',
+        enableDarkMode: false,
+        timeout: 60000
+      });
+      instance.show();
+
+      // ★ 安全超时：20s 内 TC 回调没触发就强制 reject，防止卡死
+      setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          reject(new Error('TC 回调超时 20s'));
+        }
+      }, 20000);
+    });
+  }
+
+  // 单次生成 ticket（含验证码刷新重试）
+  async function generateOneTicket() {
+    try {
+      // 1. 创建 TC 实例 → 弹出验证码
+      const ticketPromise = createCaptchaInstance();
+
+      // 2. 循环尝试 OCR（验证码可能刷新多次）
+      let solved = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        // 等验证码出现
+        const start = Date.now();
+        while (Date.now() - start < 10000 && !isCaptchaVisible()) {
+          await sleep(200);
+        }
+        if (!isCaptchaVisible()) {
+          log(`[生成器] 验证码未弹出 (尝试 ${attempt + 1})`);
+          break;
+        }
+
+        // OCR 识别
+        const ok = await solveCaptchaViaOCR();
+        if (!ok) {
+          log(`[生成器] OCR 识别失败 (尝试 ${attempt + 1})`);
+          capturedCaptchaImage = null;
+          await sleep(500);
+          continue;
+        }
+
+        // 等待 SDK 验证结果
+        await sleep(3000);
+
+        // 验证码消失了 = 验证成功，TC 回调即将触发
+        if (!isCaptchaVisible()) {
+          solved = true;
+          break;
+        }
+
+        // 验证码还在 = 验证失败，SDK 刷新了新验证码，继续尝试
+        log(`[生成器] 验证失败，验证码已刷新 (第 ${attempt + 1} 次)`);
+        capturedCaptchaImage = null;
+      }
+
+      if (!solved) {
+        log('[生成器] 多次尝试均失败');
+        return false;
+      }
+
+      // 3. 等 TC 回调完成（ticket 已在回调中存入池子）
+      // ticketPromise 内部有 20s 超时，不会卡死
+      try {
+        await ticketPromise;
+        return true;
+      } catch (e) {
+        log(`[生成器] TC 回调失败: ${e.message}`);
+        return false;
+      }
+    } catch (e) {
+      log(`[生成器] 异常: ${e.message}`);
+      return false;
+    } finally {
+      // 清理验证码残留
+      closeCaptcha();
+      capturedCaptchaImage = null;
+    }
+  }
+
+  // 批量生成 ticket 循环
+  async function runTicketGenerator() {
+    if (ticketGeneratorRunning) {
+      log('[生成器] 已在运行中');
+      return;
+    }
+
+    ticketGeneratorRunning = true;
+    const target = POOL_TARGET_SIZE;
+    log(`[生成器] 🚀 开始批量生成 (目标: ${target})`);
+    updateStatus(`生成中 ${poolAvailable()}/${target}`);
+
+    let failStreak = 0;
+    let successCount = 0;
+
+    while (ticketGeneratorRunning && poolAvailable() < target) {
+      const ok = await generateOneTicket();
+
+      if (ok) {
+        successCount++;
+        failStreak = 0;
+        updateStatus(`生成中 ${poolAvailable()}/${target} ✅${successCount}`);
+        await sleep(1000);
+      } else {
+        failStreak++;
+        if (failStreak >= 5) {
+          log('[生成器] 连续 5 次失败，等待 10s');
+          updateStatus(`生成中 ${poolAvailable()}/${target} ⏳冷却...`);
+          await sleep(10000);
+          failStreak = 0;
+        } else {
+          await sleep(3000);
+        }
+      }
+    }
+
+    ticketGeneratorRunning = false;
+    if (poolAvailable() >= target) {
+      log(`[生成器] 🎉 池子已满！${poolAvailable()} 个 ticket`);
+      updateStatus(`✅ ${poolAvailable()} ticket 就绪！`);
+    } else {
+      log(`[生成器] 已停止，池中 ${poolAvailable()} 个`);
+      updateStatus(`生成停止 | ${poolAvailable()} ticket`);
+    }
+  }
+
+  function stopTicketGenerator() {
+    ticketGeneratorRunning = false;
+    log('[生成器] 已停止');
+    updateStatus(`已停止 | ${poolAvailable()} ticket`);
+  }
+
+  // ==========================================
+  // 8. 验证码识别
   // ==========================================
 
   const CAPTCHA_WRAPPER_ID = 'tcaptcha_transform_dy';
@@ -665,7 +744,7 @@
       if (!imgSrc) { log('未找到验证码图片'); return false; }
 
       log('验证码图片: ' + imgSrc.substring(0, 80) + '...');
-      updateStatus(isWarmupMode ? '预热: 识别验证码...' : '识别验证码...');
+      updateStatus('识别验证码...');
 
       // 下载图片
       const base64Data = await downloadImageAsBase64(imgSrc);
@@ -706,7 +785,6 @@
       const scaleX = bgRect.width / origW;
       const scaleY = bgRect.height / origH;
 
-      // DPR 调试日志
       log(`缩放: CSS=${bgRect.width}x${bgRect.height}, 原图=${origW}x${origH}, DPR=${window.devicePixelRatio}, scale=${scaleX.toFixed(3)}x${scaleY.toFixed(3)}`);
 
       // 依次点击
@@ -741,32 +819,10 @@
   }
 
   // ==========================================
-  // 8. 快速通道（直接调 preview）
+  // 9. 快速通道 (FastPath)
   // ==========================================
 
-  // 从页面提取 Authorization token
-  function getAuthToken() {
-    // 策略1: 从 localStorage 中查找
-    for (const key of ['token', 'auth_token', 'access_token', 'Authorization', 'jwt', 'user_token']) {
-      try {
-        const val = realWindow.localStorage?.getItem(key);
-        if (val) return val;
-      } catch {}
-    }
-    // 策略2: 从 cookie 中查找
-    try {
-      const cookies = document.cookie;
-      const match = cookies.match(/(?:token|Authorization|auth_token)=([^;]+)/);
-      if (match) return match[1];
-    } catch {}
-    // 策略3: 从页面的全局变量中查找
-    try {
-      const w = realWindow;
-      if (w.__token__ || w.__auth_token__ || w.token) return w.__token__ || w.__auth_token__ || w.token;
-    } catch {}
-    return null;
-  }
-
+  // 用池中 ticket 直接调 preview，不走页面流程
   async function fastPathPreview() {
     const ticketInfo = poolConsume();
     if (!ticketInfo) {
@@ -775,17 +831,16 @@
     }
 
     if (!tokenPool.previewTemplate) {
-      log('[FastPath] 无 preview 模板，无法构造请求');
+      log('[FastPath] 无 preview 模板');
       ticketInfo.used = false;
       poolSave();
       return false;
     }
 
     const tpl = tokenPool.previewTemplate;
-    log(`[FastPath] 🚀 使用预存 ticket 直接调 preview!`);
 
     try {
-      // 构造请求体：只替换 ticket
+      // 构造请求体：只替换 ticket/randstr
       let bodyObj = {};
       try { bodyObj = JSON.parse(tpl.bodyTemplate); } catch {}
 
@@ -794,11 +849,8 @@
 
       const bodyStr = JSON.stringify(bodyObj);
 
-      // ★ 直接用捕获的完整 headers 重放（包含 Authorization 等）
-      // 只确保 Content-Type 正确
+      // ★ 用捕获的完整 headers 重放（包含 Authorization）
       const headers = { ...(tpl.headers || {}), 'Content-Type': 'application/json' };
-
-      log(`[FastPath] headers keys: ${Object.keys(headers).join(', ')}`);
 
       const resp = await originalFetch.call(realWindow, tpl.url, {
         method: 'POST',
@@ -815,13 +867,12 @@
           log(`[FastPath] 🎉🎉🎉 订单创建成功！`);
           return true;
         }
-        log(`[FastPath] 服务端返回: code=${json.code}, msg=${json.msg || ''}`);
+        log(`[FastPath] 服务端: code=${json.code}, msg=${json.msg || ''}`);
       } catch {
         log(`[FastPath] 响应非 JSON`);
       }
     } catch (e) {
       log(`[FastPath] 请求失败: ${e.message}`);
-      // 归还 ticket
       ticketInfo.used = false;
       poolSave();
     }
@@ -829,8 +880,40 @@
     return false;
   }
 
+  // ★ 轰炸模式：用尽所有池中 ticket 快速请求
+  async function startPurchaseBlast() {
+    const available = poolAvailable();
+    if (available === 0 || !tokenPool.previewTemplate) {
+      log(`[轰炸] 无 ticket (${available}) 或无模板，跳过 FastPath`);
+      return false;
+    }
+
+    log(`[轰炸] 🚀 快速通道轰炸！池中 ${available} 个 ticket`);
+    updateStatus(`🚀 轰炸中 0/${available}`);
+
+    let blastCount = 0;
+    while (poolAvailable() > 0 && !hasCompleted) {
+      blastCount++;
+      const success = await fastPathPreview();
+      if (success) {
+        hasCompleted = true;
+        updateStatus('🎉 抢购成功！(FastPath)');
+        log(`[轰炸] 🎉 第 ${blastCount} 次轰炸成功！请完成支付`);
+        return true;
+      }
+      if (blastCount % 10 === 0) {
+        log(`[轰炸] 进度 ${blastCount}/${available}，剩余 ${poolAvailable()}`);
+        updateStatus(`🚀 轰炸中 ${blastCount}/${available}`);
+      }
+      await sleep(50); // 极短间隔
+    }
+
+    log(`[轰炸] ${blastCount} 次轰炸均未成功，切换正常流程`);
+    return false;
+  }
+
   // ==========================================
-  // 9. 页面状态检测
+  // 10. 页面状态检测
   // ==========================================
 
   function detectDialogState() {
@@ -869,7 +952,7 @@
   }
 
   // ==========================================
-  // 10. 核心购买逻辑
+  // 11. 页面操作
   // ==========================================
 
   function dispatchRealClick(target) {
@@ -975,36 +1058,20 @@
     }
   }
 
-  // ★ 强制复位页面状态：关闭隐形遮罩、loading、弹窗
+  // 强制复位页面状态
   function forceResetPageState() {
     try {
-      // 1. 关闭所有 el-loading 遮罩
-      document.querySelectorAll('.el-loading-mask, .el-loading-spinner, .v-loading').forEach(el => {
-        el.remove();
-      });
-
-      // 2. 关闭所有 el-dialog（不管什么类型）
+      document.querySelectorAll('.el-loading-mask, .el-loading-spinner, .v-loading').forEach(el => el.remove());
       document.querySelectorAll('.el-dialog__wrapper').forEach(wrapper => {
         if (wrapper.style.display !== 'none') {
           const closeBtn = wrapper.querySelector('.el-dialog__headerbtn');
           if (closeBtn) dispatchRealClick(closeBtn);
         }
       });
-
-      // 3. 关闭 el-message-box / el-message
-      document.querySelectorAll('.el-message-box__wrapper, .el-message').forEach(el => {
-        el.remove();
-      });
-
-      // 4. 移除 body 上的 overflow:hidden（弹窗可能锁定了滚动）
+      document.querySelectorAll('.el-message-box__wrapper, .el-message').forEach(el => el.remove());
       document.body.style.overflow = '';
-
-      // 5. 移除可能的腾讯验证码残留
       const captchaWrapper = document.getElementById(CAPTCHA_WRAPPER_ID);
-      if (captchaWrapper) {
-        closeCaptcha();
-      }
-
+      if (captchaWrapper) closeCaptcha();
       log('[复位] 页面状态已强制复位');
     } catch (e) {
       log(`[复位] 失败: ${e.message}`);
@@ -1012,14 +1079,38 @@
   }
 
   // ==========================================
-  // 11. 核心轮询 tick
+  // 12. 核心轮询 tick（正常流程降级）
   // ==========================================
 
   async function tick() {
     if (!isWatching || hasCompleted) return;
 
+    // ---- 倒计时模式：等目标时间 ----
+    if (!isPurchasing) {
+      const now = Date.now();
+      const timeToTarget = targetTimestamp - now;
+
+      const countdown = getCountdown();
+      if (countdown) {
+        updateStatus(`⏳ ${countdown} | 池: ${poolAvailable()}`);
+      }
+
+      if (timeToTarget <= 0) {
+        // 到达目标时间！启动抢购
+        log('[抢购] ⏰ 目标时间到！启动抢购流程');
+        await startPurchase();
+        return;
+      }
+
+      scheduleNextTick(getCountdownDelay(now));
+      return;
+    }
+
+    // ---- 正常流程 tick（FastPath 轰炸完后的降级流程）----
+    if (!isNormalFlow) return; // 还在 FastPath 轰炸中
+
     if (retryCount > MAX_RETRY_COUNT) {
-      stopWatching({ statusText: '已停止(超限)', logMessage: '重试上限' });
+      stopWatching({ statusText: '已停止(重试超限)', logMessage: '重试上限' });
       return;
     }
 
@@ -1028,66 +1119,38 @@
       return;
     }
 
-    const now = Date.now();
-    const timeToTarget = targetTimestamp - now;
-
-    // ---------- ★ 预热模式管理 ----------
-    if (timeToTarget > 0 && timeToTarget <= WARMUP_BEFORE_MS && !isWarmupMode) {
-      isWarmupMode = true;
-      log(`[预热] 🔄 进入预热模式，开始构建 token 池 (目标: ${POOL_TARGET_SIZE} 个)`);
-      updateStatus('预热: 构建中...');
-    }
-
-    // 到达目标时间 → 退出预热
-    if (isWarmupMode && timeToTarget <= 0) {
-      isWarmupMode = false;
-      log(`[预热] ⏰ 到达目标时间！预热结束，池中 ${poolAvailable()} 个 ticket`);
-      log(`[预热] 切换到抢购模式，优先使用快速通道`);
-
-      // ★★★ 快速通道：用预存 ticket 直接调 preview ★★★
-      if (poolAvailable() > 0 && tokenPool.previewTemplate) {
-        log(`[FastPath] 🚀 尝试快速通道...`);
-        const success = await fastPathPreview();
-        if (success) {
-          hasCompleted = true;
-          updateStatus('🎉 抢购完成(FastPath)!');
-          stopWatching({ statusText: '抢购完成(FastPath)', logMessage: '快速通道成功，需手动扫码支付' });
-          return;
-        }
-        log(`[FastPath] 快速通道未成功，继续正常流程`);
-      } else {
-        log(`[FastPath] 池中无可用 ticket 或无模板，走正常流程`);
-      }
-    }
-
-    // ---------- 处理验证码等待期 ----------
+    // 处理验证码（支持池 ticket 跳过 + OCR 降级 + 刷新重试）
     if (isWaitingCaptcha) {
       if (isCaptchaVisible()) {
-        updateStatus(isWarmupMode ? '预热: 识别验证码...' : '识别验证码...');
+        // ★ 池中有 ticket → 关闭验证码，TC 回调会自动注入 pool ticket
+        if (_usePoolTicketMode && poolAvailable() > 0) {
+          log(`[抢购] ★ 池中 ${poolAvailable()} 个 ticket，关闭验证码，注入 ticket`);
+          updateStatus(`跳过验证码 (池:${poolAvailable()})`);
+          closeCaptcha(); // 关闭弹窗 → TC SDK 触发回调 → 包装器注入 pool ticket → 页面继续
+          isWaitingCaptcha = false;
+          await sleep(800); // 等页面处理回调 + 调 preview
+          scheduleNextTick(200);
+          return;
+        }
+
+        // 池空 → OCR 识别
+        updateStatus('OCR 识别验证码...');
         const solved = await solveCaptchaViaOCR();
         if (solved) {
-          log('验证码已识别，等待结果...');
+          log('验证码已识别，等待验证结果...');
           await sleep(1500);
           if (!isCaptchaVisible()) {
             log('验证码消失，识别成功');
             isWaitingCaptcha = false;
-            // 预热模式下，验证码解完后 ticket 会被 TencentCaptcha 回调捕获
-            // 然后 preview 请求会被 fetch 拦截器捕获和阻止
           } else {
-            log('验证码仍在，关闭重试');
-            closeCaptcha();
-            isWaitingCaptcha = false;
+            log('验证失败，验证码已刷新，将重新识别');
             capturedCaptchaImage = null;
-            await sleep(500);
           }
         } else {
-          log('识别失败，关闭重试');
-          closeCaptcha();
-          isWaitingCaptcha = false;
+          log('OCR 识别失败，等待重试');
           capturedCaptchaImage = null;
-          await sleep(500);
         }
-        scheduleNextTick(200);
+        scheduleNextTick(300);
         return;
       } else {
         log('验证码界面消失，继续流程');
@@ -1096,139 +1159,89 @@
       }
     }
 
-    // ---------- 弹窗检测 ----------
-    if (now >= targetTimestamp - 1000 || isWarmupMode) {
-      const dialogState = detectDialogState();
-
-      if (dialogState) {
-        if (dialogState.type === 'success-pay' || dialogState.type === 'confirm-pay') {
-          // 预热模式下不应该出现支付弹窗（因为我们阻止了 preview），但防御性检测
-          if (isWarmupMode) {
-            log(`[预热] 意外: 出现支付弹窗(${dialogState.type})，关闭继续预热`);
-            if (dialogState.closeBtn) dispatchRealClick(dialogState.closeBtn);
-            await sleep(500);
-            scheduleNextTick(500);
-            return;
-          }
-          log(`🎉 检测到支付弹窗(${dialogState.type})，停止！`);
-          hasCompleted = true;
-          stopWatching({ statusText: '抢购完成', logMessage: '需手动扫码支付' });
-          return;
+    // 弹窗检测
+    const dialogState = detectDialogState();
+    if (dialogState) {
+      if (dialogState.type === 'success-pay' || dialogState.type === 'confirm-pay') {
+        log(`🎉 检测到支付弹窗(${dialogState.type})，停止！`);
+        hasCompleted = true;
+        stopWatching({ statusText: '🎉 抢购成功！请扫码支付', logMessage: '需手动扫码支付' });
+        return;
+      }
+      if (dialogState.type === 'busy' || dialogState.type === 'empty-price') {
+        retryCount++;
+        log(`[${retryCount}] 无效弹窗(${dialogState.type})，关闭重试`);
+        if (dialogState.closeBtn) {
+          dispatchRealClick(dialogState.closeBtn);
+          await sleep(getDialogRetryDelay());
         }
-
-        if (dialogState.type === 'busy' || dialogState.type === 'empty-price') {
-          retryCount++;
-          const prefix = isWarmupMode ? `[预热#${retryCount}]` : `[${retryCount}]`;
-          log(`${prefix} 无效弹窗(${dialogState.type})，关闭重试`);
-          if (dialogState.closeBtn) {
-            dispatchRealClick(dialogState.closeBtn);
-            await sleep(getDialogRetryDelay());
-          }
-          scheduleNextTick(0);
-          return;
-        }
+        scheduleNextTick(0);
+        return;
       }
     }
 
-    // ---------- 检测验证码 ----------
+    // 验证码检测
     if (isCaptchaVisible()) {
       isWaitingCaptcha = true;
-      noCaptchaStreak = 0;  // 验证码出现了，重置计数
+      noCaptchaStreak = 0;
       log('触发验证码，开始识别...');
-      updateStatus(isWarmupMode ? '预热: 验证码识别' : '验证码识别');
+      updateStatus('验证码识别');
       scheduleNextTick(200);
       return;
     }
 
-    // ---------- 正常点击流程 ----------
-    const countdown = getCountdown();
-    if (isWarmupMode) {
-      updateStatus(`预热中 | 池: ${poolAvailable()}/${POOL_TARGET_SIZE}`);
-    } else if (countdown) {
-      updateStatus(`倒计时 ${countdown} | 池: ${poolAvailable()}`);
-    } else {
-      updateStatus(`已到点 | 池: ${poolAvailable()}`);
-    }
+    // 点击购买按钮
+    updateStatus(`抢购中 #${retryCount} | 池: ${poolAvailable()}`);
 
     const cycleReady = ensureBillingCycleSelected();
     if (!cycleReady) { scheduleNextTick(); return; }
     if (Date.now() - lastCycleSwitchAt < CYCLE_SETTLE_MS) { scheduleNextTick(); return; }
 
-    // ★ 预热模式：在目标时间前也允许点击（但有冷却）
-    if (!isWarmupMode && Date.now() < targetTimestamp) {
-      scheduleNextTick();
-      return;
-    }
-
-    // 预热模式冷却控制
-    if (isWarmupMode && Date.now() - lastWarmupClickAt < WARMUP_COOLDOWN_MS) {
-      scheduleNextTick(500);
-      return;
-    }
-
-    // 池子满了就停止预热点击（节省验证码配额）
-    if (isWarmupMode && poolAvailable() >= POOL_TARGET_SIZE) {
-      log(`[预热] 池子已满(${poolAvailable()}/${POOL_TARGET_SIZE})，等待目标时间`);
-      updateStatus(`预热完成 | 池: ${poolAvailable()} 等待开售...`);
-      scheduleNextTick(1000);
-      return;
-    }
-
     const card = findPlanCard(config.targetPlan);
     const button = findBuyButton(card);
-
     if (!button) {
-      if (isWarmupMode) updateStatus('预热: 等待按钮渲染...');
-      else updateStatus('已到点，等待按钮渲染');
+      updateStatus('等待按钮渲染...');
       scheduleNextTick();
       return;
     }
 
-    // 触发点击
     const clicked = await triggerBuyButton(button);
     if (clicked) {
       retryCount++;
       noCaptchaStreak++;
-      lastWarmupClickAt = Date.now();
-      if (isWarmupMode) {
-        log(`[预热#${retryCount}] 点击购买按钮，等待验证码...`);
-      } else {
-        log(`[${retryCount}] 点击购买按钮`);
-      }
+      log(`[${retryCount}] 点击购买按钮`);
       await sleep(150);
 
-      // ★ 连续多次点击但没触发验证码 → 强制复位页面状态
-      if (noCaptchaStreak >= NO_CAPTCHA_RESET && isWarmupMode) {
-        log(`[预热] 连续 ${noCaptchaStreak} 次无验证码，尝试复位页面状态...`);
+      // 连续无验证码 → 复位
+      if (noCaptchaStreak >= NO_CAPTCHA_RESET) {
+        log(`连续 ${noCaptchaStreak} 次无验证码，复位页面状态...`);
         forceResetPageState();
         noCaptchaStreak = 0;
-        scheduleNextTick(2000); // 复位后多等一会儿
+        scheduleNextTick(2000);
         return;
       }
     }
 
-    scheduleNextTick(isWarmupMode ? 200 : 100);
+    scheduleNextTick(100);
   }
 
   // ==========================================
-  // 12. 控制逻辑
+  // 13. 控制逻辑
   // ==========================================
 
-  function getNextTickDelay(now = Date.now()) {
+  function getCountdownDelay(now = Date.now()) {
     const diff = targetTimestamp - now;
-    if (isWarmupMode) return 200;       // 预热模式固定节奏
     if (diff > 60_000) return 1000;
     if (diff > 10_000) return 400;
     if (diff > 3_000) return 120;
     if (diff > 0) return 30;
-    if (diff > -WATCH_GRACE_MS) return 50;
-    return 250;
+    return 50;
   }
 
   function scheduleNextTick(delay) {
     if (!isWatching) return;
     if (tickTimer) clearTimeout(tickTimer);
-    tickTimer = setTimeout(() => { tickTimer = null; void tick(); }, delay ?? getNextTickDelay());
+    tickTimer = setTimeout(() => { tickTimer = null; void tick(); }, delay ?? 100);
   }
 
   function isTargetWindowExpired(now = Date.now()) { return now > targetTimestamp + WATCH_GRACE_MS; }
@@ -1244,6 +1257,36 @@
 
   function getDialogRetryDelay() { return DIALOG_RETRY_BASE_DELAY_MS + Math.floor(Math.random() * DIALOG_RETRY_RANDOM_MS); }
 
+  // ★ 启动抢购流程（全页面流程：点按钮 → 跳过/OCR 验证码 → 页面渲染）
+  async function startPurchase() {
+    isPurchasing = true;
+    // ★ 开启池 ticket 注入模式（TC 回调自动用 pool ticket）
+    _usePoolTicketMode = (poolAvailable() > 0);
+
+    const poolInfo = poolAvailable() > 0
+      ? `池中 ${poolAvailable()} 个 ticket，将跳过验证码`
+      : '池空，将 OCR 识别验证码';
+    log(`[抢购] 🚀 启动抢购流程 (${poolInfo})`);
+    updateStatus('🚀 抢购中...');
+
+    // FastPath 轰炸（可选，直接调 API 作为补充）
+    if (poolAvailable() > 0 && tokenPool.previewTemplate) {
+      log('[抢购] 先 FastPath 轰炸一轮...');
+      const blastSuccess = await startPurchaseBlast();
+      if (blastSuccess) {
+        _usePoolTicketMode = false;
+        stopWatching({ statusText: '🎉 抢购成功！(FastPath)', logMessage: 'FastPath 成功，请完成支付' });
+        return;
+      }
+    }
+
+    // 全页面流程（点按钮 → TC → 池 ticket/OCR → preview → 渲染支付弹窗）
+    log('[抢购] 开始全页面流程');
+    isNormalFlow = true;
+    scheduleNextTick(0);
+  }
+
+  // 开始监听（倒计时模式）
   function startWatching() {
     if (isWatching) return;
     refreshTargetTimestamp();
@@ -1251,32 +1294,40 @@
     const now = Date.now();
     const timeToTarget = targetTimestamp - now;
 
-    // 如果目标时间已过，自动切换为"立即执行"模式（设为 10 秒后）
     if (timeToTarget <= 0) {
-      const expired = timeToTarget < -WATCH_GRACE_MS;
-      if (expired) {
-        // 超过 40 分钟了，真的过期
-        log('目标时间已超过 40 分钟，请修改目标时间');
+      // 目标时间已到/刚过
+      if (timeToTarget < -WATCH_GRACE_MS) {
+        log('目标时间已超过 40 分钟，请修改');
         updateStatus('已过时间，请修改');
         return;
       }
-      // 还在 40 分钟窗口内，直接开始抢购（不等倒计时）
-      log(`目标时间已到/刚过，立即开始抢购模式`);
+      // 还在窗口内，直接启动抢购
+      log('目标时间已到，立即启动抢购');
+      isWatching = true;
+      isPurchasing = false;
+      isNormalFlow = false;
+      hasCompleted = false;
+      isClicking = false;
+      isWaitingCaptcha = false;
+      retryCount = 0;
+      noCaptchaStreak = 0;
+      void startPurchase();
+      return;
     }
 
+    // 设置倒计时
     isWatching = true;
+    isPurchasing = false;
+    isNormalFlow = false;
     hasCompleted = false;
     isClicking = false;
     isWaitingCaptcha = false;
-    isWarmupMode = false;
-    lastCycleSwitchAt = 0;
-    lastWarmupClickAt = 0;
     retryCount = 0;
     noCaptchaStreak = 0;
 
     const ts = `${config.targetHour}:${String(config.targetMinute).padStart(2, '0')}:${String(config.targetSecond || 0).padStart(2, '0')}`;
-    log(`开始监听，目标时间: ${ts} | Token池: ${poolAvailable()} 个可用`);
-    updateStatus('监听中');
+    log(`开始监听，目标: ${ts} | Token池: ${poolAvailable()} 个`);
+    updateStatus(`⏳ 倒计时 ${getCountdown() || '...'}`);
     scheduleNextTick(0);
   }
 
@@ -1284,13 +1335,15 @@
     const { statusText = '已停止', logMessage = '已停止' } = options;
     if (tickTimer) { clearTimeout(tickTimer); tickTimer = null; }
     isWatching = false;
-    isWarmupMode = false;
+    isPurchasing = false;
+    isNormalFlow = false;
+    _usePoolTicketMode = false; // ★ 关闭池 ticket 注入
     if (logMessage) log(logMessage);
     updateStatus(statusText);
   }
 
   // ==========================================
-  // 13. 配置
+  // 14. 配置
   // ==========================================
 
   function clampNumber(value, min, max, fallback) {
@@ -1340,7 +1393,7 @@
     scheduleNextTick(0);
   }
 
-  // 限流页跳转处理
+  // 限流页跳转
   function getRateLimitRedirectTarget() {
     if (!location.pathname.includes('/html/rate-limit.html')) return '';
     try {
@@ -1354,7 +1407,7 @@
   }
 
   // ==========================================
-  // 14. UI
+  // 15. UI
   // ==========================================
 
   function injectStyles() {
@@ -1381,7 +1434,7 @@
       .v2-btn{flex:1;padding:8px 12px;border:none;border-radius:10px;font-size:13px;font-weight:600;cursor:pointer;color:#fff;transition:all .2s}
       .v2-btn:hover{opacity:.9;transform:translateY(-1px)}
       .v2-btn.primary{background:linear-gradient(135deg,#1d4ed8,#0ea5e9)}
-      .v2-btn.warmup{background:linear-gradient(135deg,#f59e0b,#ef4444)}
+      .v2-btn.generate{background:linear-gradient(135deg,#f59e0b,#ef4444)}
       .v2-btn.secondary{color:#475569;background:#e2e8f0}
       .v2-btn.danger{color:#fff;background:#ef4444}
       .v2-log{margin-top:10px;max-height:120px;overflow:auto;font-size:11px;color:#334155;background:#f8fafc;border-radius:8px;padding:6px 8px;line-height:1.4}
@@ -1397,7 +1450,7 @@
       <div class="v2-head">
         <div class="v2-title">
           GLM 抢购助手
-          <span class="v2-badge">v2.0 Token池</span>
+          <span class="v2-badge">v2.1 池</span>
         </div>
       </div>
       <div class="v2-body">
@@ -1416,21 +1469,25 @@
           <div class="v2-field"><label>分</label><input id="glm-v2-minute" type="number" min="0" max="59"></div><span>:</span>
           <div class="v2-field"><label>秒</label><input id="glm-v2-second" type="number" min="0" max="59"></div>
         </div>
-        <div class="v2-pool" id="glm-v2-pool-count">0 个 ticket 可用</div>
+        <div class="v2-pool" id="glm-v2-pool-count">🎟️ 0 个 ticket 可用</div>
         <div class="v2-status" id="glm-v2-status">准备就绪</div>
         <div class="v2-actions">
-          <button class="v2-btn primary" id="glm-v2-start" type="button">开始抢购</button>
-          <button class="v2-btn warmup" id="glm-v2-warmup" type="button">手动预热</button>
-          <button class="v2-btn secondary" id="glm-v2-stop" style="flex:0.5" type="button">停止</button>
+          <button class="v2-btn primary" id="glm-v2-start" type="button">🚀 开始抢购</button>
+          <button class="v2-btn generate" id="glm-v2-generate" type="button">🔥批量生成</button>
         </div>
         <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="v2-btn secondary" id="glm-v2-stop" style="flex:0.5" type="button">停止</button>
           <button class="v2-btn danger" id="glm-v2-clear-pool" style="flex:0.5;font-size:11px" type="button">清空池</button>
-          <button class="v2-btn secondary" id="glm-v2-test-fastpath" style="flex:0.5;font-size:11px" type="button">测试FastPath</button>
+          <button class="v2-btn secondary" id="glm-v2-test-fastpath" style="flex:0.5;font-size:11px" type="button">测试FP</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="v2-btn secondary" id="glm-v2-test-ttl" style="flex:1;font-size:11px" type="button">⏱️测有效期</button>
         </div>
         <div class="v2-log" id="glm-v2-log"></div>
       </div>`;
     document.body.appendChild(panel);
 
+    // 配置绑定
     const planEl = document.getElementById('glm-v2-plan');
     const cycleEl = document.getElementById('glm-v2-cycle');
     const hourEl = document.getElementById('glm-v2-hour');
@@ -1449,49 +1506,218 @@
     minEl.addEventListener('change', () => { config.targetMinute = Math.max(0, Math.min(59, Number(minEl.value) || 0)); minEl.value = config.targetMinute; handleConfigChange(); });
     secEl.addEventListener('change', () => { config.targetSecond = Math.max(0, Math.min(59, Number(secEl.value) || 0)); secEl.value = config.targetSecond; handleConfigChange(); });
 
+    // ★ 按钮绑定
     document.getElementById('glm-v2-start').addEventListener('click', startWatching);
-    document.getElementById('glm-v2-stop').addEventListener('click', () => stopWatching());
-
-    // 手动预热按钮：立即进入预热模式
-    document.getElementById('glm-v2-warmup').addEventListener('click', () => {
-      if (!isWatching) {
-        refreshTargetTimestamp();
-        isWatching = true;
-        hasCompleted = false;
-        isClicking = false;
-        isWaitingCaptcha = false;
-        retryCount = 0;
-      }
-      isWarmupMode = true;
-      log('[手动预热] 🔄 开始预热，构建 token 池');
-      updateStatus('手动预热中...');
-      scheduleNextTick(0);
+    document.getElementById('glm-v2-stop').addEventListener('click', () => {
+      stopWatching();
+      stopTicketGenerator();
     });
 
-    // 清空池按钮
+    // ★ 批量生成按钮
+    document.getElementById('glm-v2-generate').addEventListener('click', () => {
+      if (ticketGeneratorRunning) {
+        stopTicketGenerator();
+      } else {
+        runTicketGenerator();
+      }
+    });
+
+    // 清空池
     document.getElementById('glm-v2-clear-pool').addEventListener('click', () => {
       poolClear();
       updatePoolStatus();
     });
 
-    // 测试快速通道
+    // 测试全流程（点按钮 → 跳过/OCR 验证码 → 等支付弹窗）
     document.getElementById('glm-v2-test-fastpath').addEventListener('click', async () => {
-      log('[测试] 尝试 FastPath...');
-      if (poolAvailable() === 0) {
-        log('[测试] 池中无 ticket，请先预热');
+      log('[测试] 🧪 开始全流程测试...');
+
+      // 检查购买按钮
+      const card = findPlanCard(config.targetPlan);
+      const button = findBuyButton(card);
+      if (!button) {
+        log('[测试] ❌ 未找到购买按钮，请确认套餐和页面状态');
         return;
       }
+
+      // 开启池 ticket 模式（如果有）
+      const usePool = poolAvailable() > 0;
+      _usePoolTicketMode = usePool;
+      log(`[测试] 池中 ${poolAvailable()} 个 ticket, ${usePool ? '将跳过验证码' : '将 OCR 识别'}`);
+      updateStatus('🧪 测试中...');
+
+      // 1. 点击购买按钮
+      const clicked = await triggerBuyButton(button);
+      if (!clicked) {
+        log('[测试] ❌ 点击购买按钮失败');
+        _usePoolTicketMode = false;
+        return;
+      }
+      log('[测试] ✅ 已点击购买按钮');
+      await sleep(500);
+
+      // 2. 等验证码弹出
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 5000) {
+        if (isCaptchaVisible()) break;
+        await sleep(200);
+      }
+
+      if (isCaptchaVisible()) {
+        if (usePool) {
+          // 有池 ticket → 关闭验证码，TC 回调注入 ticket
+          log('[测试] ★ 验证码已弹出，关闭并注入池 ticket');
+          closeCaptcha();
+          await sleep(2000);
+        } else {
+          // 无池 ticket → OCR 识别
+          log('[测试] 验证码已弹出，OCR 识别中...');
+          const solved = await solveCaptchaViaOCR();
+          if (solved) {
+            log('[测试] ✅ OCR 识别完成，等待验证...');
+            await sleep(3000);
+          } else {
+            log('[测试] ❌ OCR 识别失败');
+            closeCaptcha();
+          }
+        }
+      } else {
+        log('[测试] 验证码未弹出（可能直接走了 preview 或被拦截）');
+      }
+
+      _usePoolTicketMode = false;
+
+      // 3. 检查结果
+      await sleep(1000);
+      const dialogState = detectDialogState();
+      if (dialogState) {
+        if (dialogState.type === 'success-pay' || dialogState.type === 'confirm-pay') {
+          log('[测试] 🎉🎉🎉 测试成功！出现支付弹窗！');
+          updateStatus('🎉 测试成功！');
+        } else {
+          log(`[测试] ⚠️ 出现弹窗: ${dialogState.type}`);
+          // 关闭测试弹窗
+          if (dialogState.closeBtn) dispatchRealClick(dialogState.closeBtn);
+          updateStatus(`测试: ${dialogState.type}`);
+        }
+      } else {
+        log('[测试] ❌ 未检测到支付弹窗');
+        updateStatus('测试: 未出现弹窗');
+      }
+    });
+
+    // ⏱️ 测 ticket 有效期：生成多个 ticket，每个在不同延迟后只测一次，找出真实 TTL
+    document.getElementById('glm-v2-test-ttl').addEventListener('click', async () => {
+      log('[TTL] ⏱️ 开始 ticket 有效期测试（每个 ticket 只用一次）');
+      updateStatus('TTL 测试中...');
+
       if (!tokenPool.previewTemplate) {
-        log('[测试] 无 preview 模板，请先预热至少一次');
+        log('[TTL] ❌ 无 preview 模板，请先通过页面手动购买一次来捕获');
+        updateStatus('TTL: 无模板');
         return;
       }
-      const result = await fastPathPreview();
-      log(`[测试] FastPath 结果: ${result ? '✅ 成功' : '❌ 失败'}`);
+
+      // 测试计划：每个时间点生成一个 ticket，等待后只测一次
+      const testPoints = [0, 60, 120, 180, 240, 300, 420]; // 秒
+      const results = [];
+
+      for (let i = 0; i < testPoints.length; i++) {
+        const delaySec = testPoints[i];
+        log(`[TTL] [${i + 1}/${testPoints.length}] 生成 ticket (目标延迟 ${delaySec}s)...`);
+        updateStatus(`TTL: 生成中 ${i + 1}/${testPoints.length}`);
+
+        // 生成一个 ticket
+        const ok = await generateOneTicket();
+        if (!ok) {
+          log(`[TTL] [${i + 1}] ❌ 生成失败，跳过`);
+          continue;
+        }
+
+        // 取出刚生成的 ticket
+        const now = Date.now();
+        const fresh = tokenPool.tickets
+          .filter(t => !t.used && now - t.ts < TICKET_MAX_AGE_MS)
+          .sort((a, b) => b.ts - a.ts);
+        if (!fresh.length) {
+          log(`[TTL] [${i + 1}] ❌ 无可用 ticket，跳过`);
+          continue;
+        }
+        const ticket = fresh[0];
+        ticket.used = true;
+        poolSave();
+
+        // 等待目标延迟
+        if (delaySec > 0) {
+          log(`[TTL] [${i + 1}] 等待 ${delaySec}s 后测试...`);
+          updateStatus(`TTL: 等待 ${delaySec}s (${i + 1}/${testPoints.length})`);
+          await sleep(delaySec * 1000);
+        }
+
+        // 只测一次
+        const elapsed = Math.round((Date.now() - ticket.ts) / 1000);
+        log(`[TTL] [${i + 1}] ⏱️ ${elapsed}s → 测试...`);
+
+        try {
+          const tpl = tokenPool.previewTemplate;
+          let bodyObj = {};
+          try { bodyObj = JSON.parse(tpl.bodyTemplate); } catch {}
+          bodyObj.ticket = ticket.ticket;
+          if (ticket.randstr) bodyObj.randstr = ticket.randstr;
+
+          const headers = { ...(tpl.headers || {}), 'Content-Type': 'application/json' };
+          const resp = await originalFetch.call(realWindow, tpl.url, {
+            method: 'POST', headers, body: JSON.stringify(bodyObj)
+          });
+          const text = await resp.text();
+
+          let success = false;
+          let msg = '';
+          try {
+            const json = JSON.parse(text);
+            msg = `code=${json.code} msg=${json.msg || ''}`;
+            if (json.code === 0 || json.success || json.code === 200) success = true;
+          } catch {
+            msg = text.substring(0, 100);
+          }
+
+          results.push({ delay: elapsed, ok: success, msg });
+          log(`[TTL] [${i + 1}] ${success ? '✅' : '❌'} ${elapsed}s → ${msg}`);
+        } catch (e) {
+          results.push({ delay: elapsed, ok: false, msg: e.message });
+          log(`[TTL] [${i + 1}] ❌ ${elapsed}s → 异常: ${e.message}`);
+        }
+
+        // 每轮之间短暂冷却
+        if (i < testPoints.length - 1) await sleep(2000);
+      }
+
+      // 汇总
+      log('[TTL] ──────── 汇总 ────────');
+      for (const r of results) {
+        log(`[TTL]   ${r.delay}s → ${r.ok ? '✅ 有效' : '❌ 失效'} (${r.msg})`);
+      }
+
+      const validDelays = results.filter(r => r.ok).map(r => r.delay);
+      const invalidDelays = results.filter(r => !r.ok).map(r => r.delay);
+
+      if (validDelays.length > 0 && invalidDelays.length > 0) {
+        const maxValid = Math.max(...validDelays);
+        const minInvalid = Math.min(...invalidDelays);
+        log(`[TTL] 📊 有效期: ${maxValid}s ~ ${minInvalid}s (${Math.round(maxValid/60)}~${Math.round(minInvalid/60)} 分钟)`);
+        updateStatus(`TTL: ${maxValid}~${minInvalid}s`);
+      } else if (validDelays.length === results.length) {
+        const max = Math.max(...validDelays);
+        log(`[TTL] 📊 全部有效！至少 ${max}s (>${Math.round(max/60)} 分钟)`);
+        updateStatus(`TTL: >${max}s`);
+      } else if (invalidDelays.length === results.length) {
+        log(`[TTL] 📊 全部失效（ticket 可能不适用于此 API）`);
+        updateStatus('TTL: 全部失效');
+      }
     });
   }
 
   // ==========================================
-  // 15. 启动
+  // 16. 启动
   // ==========================================
 
   function bootstrap() {
@@ -1500,7 +1726,7 @@
     buildPanel();
     updateStatus('准备就绪');
     updatePoolStatus();
-    log(`GLM 抢购助手 v2.0 加载完毕 | Token池: ${poolAvailable()} 个可用`);
+    log(`GLM 抢购助手 v2.1 加载完毕 | Token池: ${poolAvailable()} 个可用`);
   }
 
   if (document.readyState === 'loading') {
