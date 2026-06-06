@@ -99,7 +99,27 @@
 
   function poolSave() {
     const now = Date.now();
+    // ★ 多标签页安全：合并而非覆盖
+    // 先从 localStorage 读取其他标签页新加的 ticket，再合并写入
+    try {
+      const disk = localStorage.getItem(POOL_STORAGE_KEY);
+      if (disk) {
+        const diskPool = JSON.parse(disk);
+        if (diskPool?.tickets) {
+          // 把磁盘上的 ticket 合并进来（以磁盘为准，避免覆盖其他标签页的）
+          const myKeys = new Set(tokenPool.tickets.map(t => t.ticket));
+          for (const t of diskPool.tickets) {
+            if (!myKeys.has(t.ticket)) {
+              tokenPool.tickets.push(t);
+            }
+          }
+        }
+      }
+    } catch (e) {}
+
+    // 清理过期
     tokenPool.tickets = tokenPool.tickets.filter(t => !t.used && now - t.ts < TICKET_MAX_AGE_MS);
+
     try {
       localStorage.setItem(POOL_STORAGE_KEY, JSON.stringify(tokenPool));
     } catch (e) {}
@@ -115,6 +135,8 @@
   }
 
   function poolConsume() {
+    // ★ 多标签页安全：先从磁盘同步
+    poolLoad();
     const now = Date.now();
     const fresh = tokenPool.tickets
       .filter(t => !t.used && now - t.ts < TICKET_MAX_AGE_MS)
