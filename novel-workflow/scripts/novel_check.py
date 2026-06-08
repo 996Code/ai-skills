@@ -106,10 +106,10 @@ def detect_hook_type(text):
         return '情感临界'
     if any(w in last for w in ['危险', '逼', '来不及', '距离', '暴露', '时间不多了']):
         return '绝境'
-    if any(w in last for w in ['发现', '不是', '竟然', '居然', '没想到']):
-        return '反转'
     if any(w in last for w in ['终于', '开始']):
         return '转机'
+    if any(w in last for w in ['发现', '不是', '竟然', '居然', '没想到']):
+        return '反转'
     if any(w in last for w in ['如果', '会不会', '能不能', '？', '?', '不知道']):
         return '悬念'
     return '悬念'
