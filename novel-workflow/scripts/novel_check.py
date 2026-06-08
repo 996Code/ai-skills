@@ -379,12 +379,98 @@ def check_process(chapters):
 
     return all_pass
 
+# ============ 质量深检 ============
+def check_quality(chapters):
+    """防劣化检查：针对之前出现过的问题做专项检测"""
+    print('\n' + '=' * 50)
+    print('🔍 质量深检（防劣化）')
+    print('=' * 50)
+    problems = []
+
+    for name, text, n in chapters:
+        ch_label = f'第{n}章'
+
+        # 1. padding 循环检测：相同长句出现3次以上
+        lines = text.strip().split('\n')
+        line_counts = {}
+        for l in lines:
+            if len(l) > 40:
+                line_counts[l] = line_counts.get(l, 0) + 1
+        repeated = [l[:30] for l, c in line_counts.items() if c >= 3]
+        if repeated:
+            problems.append(f'❌ {ch_label}: 重复段落（疑似padding循环），重复段示例: {repeated[0]}...')
+
+        # 2. 审查文件质量：每个≥150字节？
+        rd = f'{BASE_DIR}/reviews/per-chapter/ch-{n:03d}'
+        if os.path.exists(rd):
+            for rf in REVIEW_FILES:
+                rp = f'{rd}/{rf}'
+                if os.path.exists(rp) and os.path.getsize(rp) < 150:
+                    problems.append(f'❌ {ch_label}: 审查文件过短 {rf} ({os.path.getsize(rp)}B)')
+
+        # 3. 破折号密度>10/千字（对话密集章节可能天然高，但>10需要关注）
+        chars = wc(text)
+        dashes = text.count('——')
+        dk = dashes / (chars / 1000) if chars > 0 else 0
+        if dk > 10:
+            problems.append(f'⚠️ {ch_label}: 破折号密度{dk:.1f}/千字（>10需关注）')
+
+        # 4. SDT 词残留
+        sdt_found = [w for w in CFG['forbidden_words'] if w in text]
+        if sdt_found:
+            problems.append(f'❌ {ch_label}: SDT残留: {",".join(sdt_found)}（各{",".join(str(text.count(w)) for w in sdt_found)}次）')
+
+        # 5. 摘要≥100字
+        sf = f'{BASE_DIR}/summaries/ch-{n:03d}-summary.md'
+        if os.path.exists(sf) and os.path.getsize(sf) < 100:
+            problems.append(f'❌ {ch_label}: 摘要过短(<100字节)')
+
+        # 6. review.md ≥150字节
+        review_file = f'{BASE_DIR}/reviews/per-chapter/ch-{n:03d}/review.md'
+        if os.path.exists(review_file) and os.path.getsize(review_file) < 150:
+            problems.append(f'❌ {ch_label}: review.md过短(<150字节)')
+
+    # 7. 跨章：连续3章同一钩子
+    hooks = [(name, detect_hook_type(text)) for name, text, _ in chapters]
+    HW = CFG['hook_window']
+    for i in range(HW - 1, len(hooks)):
+        window = hooks[i-HW+1:i+1]
+        types = [h[1] for h in window]
+        if len(set(types)) == 1:
+            names = '→'.join(h[0].replace('第','').replace('章：','') for h in window)
+            problems.append(f'❌ 钩子重复: {names} 连续{HW}章{types[0]}')
+
+    # 8. 跨章：连续3章相同情绪
+    emotions = []
+    for name, text, _ in chapters:
+        dom = detect_emotion(text)
+        emotions.append((name, dom))
+    for i in range(HW - 1, len(emotions)):
+        if emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
+            names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-2:i+1])
+            problems.append(f'❌ 情绪平坦: {names} 连续{HW}章{emotions[i][1]}')
+
+    # 9. 章节号连续性
+    nums = sorted([n for _, _, n in chapters])
+    for i in range(len(nums)-1):
+        if nums[i+1] - nums[i] != 1:
+            problems.append(f'❌ 章节号不连续: 第{nums[i]}章→第{nums[i+1]}章')
+
+    print(f'\n📋 质量深检问题:')
+    if problems:
+        for p in problems:
+            print(f'  {p}')
+    else:
+        print('  ✅ 无问题')
+    return len(problems) == 0
+
 # ============ CLI ============
 def parse_args():
     p = argparse.ArgumentParser(description='小说统一检查脚本')
     p.add_argument('--config', metavar='PATH', help='配置文件路径（自动发现 novels/*/novel-config.json）')
     g = p.add_mutually_exclusive_group()
     g.add_argument('--single', metavar='FILE', help='仅检查单个章节文件（verbose）')
+    g.add_argument('--quality', action='store_true', help='仅质量深检（防劣化）')
     g.add_argument('--slide', action='store_true', help='仅滑动窗口跨章检查')
     g.add_argument('--chapter', metavar='NAME', help='按章节名模糊匹配（verbose）')
     g.add_argument('--process', action='store_true', help='仅流程文档检查')
@@ -439,6 +525,10 @@ def main():
         proc_pass = check_process(chapters)
         sys.exit(0 if proc_pass else 1)
 
+    if args.quality:
+        qual_pass = check_quality(chapters)
+        sys.exit(0 if qual_pass else 1)
+
     do_process = not args.quick
 
     print('=' * 50)
@@ -460,15 +550,20 @@ def main():
     if do_process:
         proc_pass = check_process(chapters)
 
+    qual_pass = True
+    if do_process:
+        qual_pass = check_quality(chapters)
+
     print('\n' + '=' * 50)
     parts = [f'{passed_count}/{len(chapters)} 章合格']
     parts.append(f'滑动窗口{"✅" if slide_pass else "❌"}')
     if do_process:
         parts.append(f'流程文档{"✅" if proc_pass else "❌"}')
+        parts.append(f'质量深检{"✅" if qual_pass else "❌"}')
     print(f'📊 总结: {" | ".join(parts)}')
     print('=' * 50)
 
-    sys.exit(0 if (all_pass and slide_pass and proc_pass) else 1)
+    sys.exit(0 if (all_pass and slide_pass and proc_pass and qual_pass) else 1)
 
 if __name__ == '__main__':
     main()
