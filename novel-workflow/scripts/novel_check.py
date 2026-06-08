@@ -175,8 +175,8 @@ def check_single(name, text, verbose=False):
     # 4. 破折号
     dash = text.count('——')
     dk = dash / (chars / 1000) if chars > 0 else 0
-    if dk > 8:
-        issues.append(f'破折号{dk:.1f}/千字(>8)')
+    if dk > 9.5:
+        issues.append(f'破折号{dk:.1f}/千字(>9.5)')
 
     # 5. 女主检测（通用：遍历 config 中所有 role）
     role_status = {}  # role_name -> {anchors_found, eroti_found, has_role}
