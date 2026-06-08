@@ -337,8 +337,8 @@ def check_process(chapters):
             rpath = f'{ch_dir}/{rf}'
             if not os.path.exists(rpath):
                 issues_by_ch[n].append(f'缺少审查: {rf}')
-            elif os.path.getsize(rpath) < 100:
-                issues_by_ch[n].append(f'审查文件过短(<100字节，疑似模板): {rf}')
+            elif os.path.getsize(rpath) < 150:
+                issues_by_ch[n].append(f'审查文件过短(<150字节，疑似模板): {rf}')
 
     # 时间线
     timeline_file = f'{BASE_DIR}/planning/bible/timeline.md'
