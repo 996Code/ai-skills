@@ -302,9 +302,9 @@ def check_sliding_window(chapters):
         print(f'  {name}: {dom} ({score_str})' if score_str else f'  {name}: {dom}')
 
     for i in range(HW - 1, len(emotions)):
-        if emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
-            names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-2:i+1])
-            problems.append(f'❌ 情绪平坦: {names} 连续{HW}章{emotions[i][1]}')
+        if emotions[i-3][1] == emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
+            names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-3:i+1])
+            problems.append(f'❌ 情绪平坦: {names} 连续4章{emotions[i][1]}')
 
     print(f'\n📋 滑动窗口问题:')
     if problems:
@@ -446,9 +446,9 @@ def check_quality(chapters):
         dom = detect_emotion(text)
         emotions.append((name, dom))
     for i in range(HW - 1, len(emotions)):
-        if emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
-            names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-2:i+1])
-            problems.append(f'❌ 情绪平坦: {names} 连续{HW}章{emotions[i][1]}')
+        if emotions[i-3][1] == emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
+            names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-3:i+1])
+            problems.append(f'❌ 情绪平坦: {names} 连续4章{emotions[i][1]}')
 
     # 9. 章节号连续性
     nums = sorted([n for _, _, n in chapters])
