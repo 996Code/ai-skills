@@ -157,7 +157,15 @@ def check_single(name, text, verbose=False):
     if not ok:
         diff = 2850 - chars if chars < 2850 else chars - 3150
         direction = '差' if chars < 2850 else '多'
-        issues.append(f'字数{chars}({direction}{diff})')
+        suggestion = ''
+        if chars < 2850:
+            if diff > 200:
+                suggestion = ' [建议重写场景，不要逐句追加]'
+            else:
+                suggestion = ' [手写扩写实质性内容]'
+        else:
+            suggestion = ' [删减冗余段落]'
+        issues.append(f'字数{chars}({direction}{diff}){suggestion}')
 
     # 2. Show Don't Tell
     sdt = []
