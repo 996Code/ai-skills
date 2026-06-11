@@ -423,8 +423,8 @@ def check_process(chapters):
         print('\n✅ 所有章节流程文档齐全')
     else:
         print(f'\n❌ 共 {sum(len(v) for v in issues_by_ch.values())} 项流程缺失')
-        # 重新计算是否完全通过
-        all_pass = all_pass and len(issues_by_ch) == 0
+
+    return all_pass
 
 # ============ 质量深检 ============
 def check_quality(chapters):
