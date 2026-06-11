@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OUTPUT=$(python3 \"$CLAUDE_PROJECT_DIR/scripts/novel_check.py\" 2>&1); EXIT=$?; echo \"[$(date '+%Y-%m-%d %H:%M:%S')] exit=$EXIT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; echo \"$OUTPUT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; if [ $EXIT -ne 0 ]; then echo \"$OUTPUT\" | grep -E '❌|不合格|缺失|重复|建议重写' | head -10; echo '{\"systemMessage\": \"全检未通过！请修复问题后再继续。字数差>200建议重写场景，不要逐句追加。\", \"continue\": true}'; else echo '{\"systemMessage\": \"全检通过\", \"continue\": true}'; fi",
+            "command": "OUTPUT=$(python3 \"$CLAUDE_PROJECT_DIR/scripts/novel_check.py\" 2>&1); EXIT=$?; echo \"[$(date '+%Y-%m-%d %H:%M:%S')] exit=$EXIT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; echo \"$OUTPUT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; if [ $EXIT -ne 0 ]; then echo \"$OUTPUT\" | grep -E '❌|不合格|缺失|重复|建议重写|大纲' | head -10; echo '{\"systemMessage\": \"全检未通过！请修复问题后再继续。字数差>200建议重写场景，不要逐句追加。大纲缺失需先补大纲。\", \"continue\": true}'; else echo '{\"systemMessage\": \"全检通过\", \"continue\": true}'; fi",
             "timeout": 60,
             "statusMessage": "全量检查（正文+滑动+流程文档）..."
           }

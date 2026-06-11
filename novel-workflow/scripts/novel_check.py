@@ -38,6 +38,10 @@ DEFAULTS = {
 # 流程文档清单（通用约定，与 SKILL.md 对齐）
 REVIEW_FILES = ['逻辑侦探.md', '情感猎手.md', '风格鉴定师.md', '结构建筑师.md', '世界观守门人.md', 'review.md']
 
+# 大纲文件约定（新卷开始必须存在）
+OUTLINE_VOLUME_PATTERN = 'planning/outline/volumes/vol-*.md'
+OUTLINE_CHAPTER_PATTERN = 'planning/outline/chapters/v*-ch*.md'
+
 # ============ 配置加载 ============
 
 def auto_discover_config():
@@ -380,12 +384,47 @@ def check_process(chapters):
         else:
             print(f'✅ 第{n}章: 流程文档齐全')
 
+    # ============ 大纲文件检查（新增） ============
+    # 检查是否有卷纲+逐章细纲
+    vol_files = sorted(glob.glob(f'{BASE_DIR}/{OUTLINE_VOLUME_PATTERN}'))
+    ch_files = sorted(glob.glob(f'{BASE_DIR}/{OUTLINE_CHAPTER_PATTERN}'))
+
+    if not vol_files:
+        print('\n❌ 大纲缺失: 无卷纲文件 (planning/outline/volumes/vol-*.md)')
+        all_pass = False
+    else:
+        print(f'\n📋 卷纲文件: {len(vol_files)} 个 ({", ".join(os.path.basename(f) for f in vol_files)})')
+
+    if not ch_files:
+        print('❌ 大纲缺失: 无逐章细纲文件 (planning/outline/chapters/v*-ch*.md)')
+        all_pass = False
+    else:
+        print(f'📋 逐章细纲文件: {len(ch_files)} 个')
+
+    # 检查当前章节范围是否在大纲覆盖范围内
+    if chapter_nums and ch_files:
+        max_ch = max(chapter_nums)
+        # 从细纲文件名推断覆盖范围
+        covered_max = 0
+        for cf in ch_files:
+            basename = os.path.basename(cf)
+            # 匹配 v2-ch29-56.md 或 v3-ch57-84.md 等格式
+            m = re.search(r'ch(\d+)-(\d+)', basename)
+            if m:
+                end = int(m.group(2))
+                if end > covered_max:
+                    covered_max = end
+        if covered_max > 0 and max_ch > covered_max:
+            print(f'❌ 大纲覆盖不足: 当前已写到第{max_ch}章，但逐章细纲最多只覆盖到第{covered_max}章')
+            print(f'   建议：先写 planning/outline/chapters/v[N]-ch{covered_max+1}-XX.md 再继续执笔')
+            all_pass = False
+
     if all_pass:
         print('\n✅ 所有章节流程文档齐全')
     else:
         print(f'\n❌ 共 {sum(len(v) for v in issues_by_ch.values())} 项流程缺失')
-
-    return all_pass
+        # 重新计算是否完全通过
+        all_pass = all_pass and len(issues_by_ch) == 0
 
 # ============ 质量深检 ============
 def check_quality(chapters):
