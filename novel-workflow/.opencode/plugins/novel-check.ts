@@ -7,7 +7,7 @@
  *  1) tool.execute.before（硬门禁）：写/改第 N 章前先验「上一章」第 N-1 章 --single；
  *     上一章没过就 throw 阻断本次写入——错误信息会回传给模型（opencode #6862），
  *     模型必须先把上一章修绿才能开写下一章。等价于"禁止未过单章检查就连写多章"。
- *  2) tool.execute.after（软提醒）：写完立刻跑 --single，结果落日志+控制台红字，不 throw（避免 TUI 风险）。
+ *  2) tool.execute.after（硬自检·对齐Claude）：写完跑全量 novel_check（正文+滑动+流程文档），任一失败就 throw 强制逐项修——主动驱动自闭环。
  *
  * 加载：放 .opencode/plugins/，opencode 启动自动加载。仅用 Bun 内置 $，无 npm 依赖。
  * 不 import @opencode-ai/plugin —— 那个类型导入会触发 opencode 本地 bun install，
@@ -73,7 +73,7 @@ const NovelCheckPlugin = async ({ client, $, directory }: AnyCtx) => {
       }
     },
 
-    // ── 软提醒（不 throw）────────────────────────────────────
+    // ── 写后自检（对齐 Claude Code：全量 novel_check，任一失败就 throw 强制修）──
     "tool.execute.after": async (input: any, output: any) => {
       try {
         if (input.tool !== "write" && input.tool !== "edit") return
@@ -81,23 +81,26 @@ const NovelCheckPlugin = async ({ client, $, directory }: AnyCtx) => {
         const p = String((args.filePath as string) ?? (args.path as string) ?? "")
         const norm = p.replace(/\\/g, "/")
         if (!/novels\/.*\/text\/第.*章.*\.txt$/.test(norm)) return
+        const script = directory + "/scripts/novel_check.py"
 
-        const res = await checkSingle(p)
-        await client.app.log({
-          body: {
-            service: "novel-check",
-            level: res.ok ? "info" : "warn",
-            message: `${res.ok ? "✅" : "❌"} --single ${p}`,
-            extra: { out: res.out.slice(0, 2000) },
-          },
-        })
-        await appendLog(`${res.ok ? "✅" : "❌"} ${p}\n${res.out.slice(0, 3000)}`)
-        if (!res.ok) {
-          console.error(
-            `【本章未通过 --single】${p}\n${pick(res.out)}\n→ python3 scripts/novel_check.py --single "${p}"`,
+        // 全量检查（正文+滑动+流程文档，和 Claude Code 的 hook 一致）
+        const r = await $`python3 ${script}`.nothrow()
+        const out = String(r.stdout || "") + String(r.stderr || "")
+        const ok = r.exitCode === 0
+        await client.app.log({ body: { service: "novel-check", level: ok ? "info" : "warn", message: `${ok ? "✅全检通过" : "❌全检未过"} (写后)` } })
+        await appendLog(`${ok ? "✅" : "❌"} 写后全检\n${out.slice(0, 2000)}`)
+
+        if (!ok) {
+          const errs = out.split("\n").filter((l) => /❌/.test(l)).slice(0, 15).join("\n")
+          throw new Error(
+            `【写后全检未过】全量 novel_check exit=${r.exitCode}\n${errs}\n\n` +
+              `有问题就改：逐项修复上面的 ❌（单章正文/滑动窗口/流程文档 全部），重跑 python3 scripts/novel_check.py 到 exit 0 再继续。hook 强制自检。`,
           )
         }
-      } catch {}
+      } catch (e: any) {
+        // 「写后全检未过」向上抛强制修；其它意外吞掉不破坏 TUI
+        if (e instanceof Error && /写后全检未过/.test(e.message)) throw e
+      }
     },
   }
 }

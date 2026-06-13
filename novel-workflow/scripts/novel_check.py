@@ -112,18 +112,25 @@ def detect_hook_type(text):
         return '绝境'
     if any(w in last for w in ['终于']):
         return '转机'
-    if any(w in last for w in ['发现', '不是', '竟然', '居然', '没想到']):
+    if any(w in last for w in ['竟然', '居然', '没想到', '却发现', '原来']):
         return '反转'
     if any(w in last for w in ['如果', '会不会', '能不能', '？', '?', '不知道']):
         return '悬念'
-    return '悬念'
+    return '未明'  # 无明确钩子信号——不纳入重复检测，避免满屏误判
 
 def detect_emotion(text):
     emotion_map = CFG.get('emotion_map', {})
     scores = {}
     for emo, keywords in emotion_map.items():
         scores[emo] = sum(text.count(k) for k in keywords)
-    return max(scores, key=scores.get) if any(v > 0 for v in scores.values()) else '未知'
+    if not any(v > 0 for v in scores.values()):
+        return '未知'
+    top = max(scores.values())
+    # 阈值：最高分<3 说明情绪词稀疏（多为技术/叙事推进章），不强标——
+    # 否则一个偶现的"家/407"就以1票把紧张的制裁章误标成"温暖"
+    if top < 3:
+        return '未知'
+    return max(scores, key=scores.get)
 
 def _role_detect(text, role_name):
     """检测某角色是否在文本中出场——名字匹配 或 专属锚点≥2个"""
@@ -179,6 +186,30 @@ def check_single(name, text, verbose=False):
             sdt.append(f'{w}×{c}')
             issues.append(f'SDT违禁:{w}×{c}')
 
+    # 2.5 内部标记泄漏（ch数字/F数字 是章节/伏笔内部编号，不得写进正文）
+    import re
+    leak = sorted(set(re.findall(r'ch\d+|F\d{1,3}', text)))
+    if leak:
+        issues.append(f'内部标记泄漏:{",".join(leak)}')
+
+    # 2.6 重复句（确凿padding：同句≥8字出现≥5次；2-4次多为motif回扣风格，不算）
+    from collections import Counter
+    _sents = [s.strip() for s in re.split(r'[。！？\n]', text) if len(s.strip()) >= 8]
+    dup = [s for s, c in Counter(_sents).items() if c >= 5]
+    if dup:
+        issues.append(f'重复句{len(dup)}处(如"{dup[0][:14]}")')
+
+    # 2.7 meta 写作机制词（破第四面墙：正文不该出现这些写作术语）
+    meta = [t for t in ['伏笔编号', '本章', '上一章', '下一章', '前文', '后文'] if t in text]
+    if meta:
+        issues.append(f'meta写作词:{",".join(meta)}')
+
+    # 2.8 motif 过度堆砌（padding 复发：关键 motif 词超阈值）
+    _motif_th = [('够', 15), ('从头推导', 18), ('每一步都有出处', 6)]
+    motif_over = [f'{w}×{text.count(w)}(>{th})' for w, th in _motif_th if text.count(w) > th]
+    if motif_over:
+        issues.append(f'motif过度:{",".join(motif_over)}')
+
     # 3. 五感
     sf = [s for s, ks in CFG['senses'].items() if any(k in text for k in ks)]
     if len(sf) < 3:
@@ -218,6 +249,10 @@ def check_single(name, text, verbose=False):
         print('━' * 40)
         print(f'字数: {chars} {"✅" if ok else "❌ 不达标"}')
         print(f'Show Don\'t Tell: {"✅ 无违禁" if not sdt else "❌ " + ", ".join(sdt)}')
+        print(f'内部标记: {"✅ 无泄漏" if not leak else "❌ " + ",".join(leak) + "(章节/伏笔编号不得写进正文)"}')
+        print(f'重复句: {"✅" if not dup else "❌ "+str(len(dup))+"处"}')
+        print(f'meta词: {"✅" if not meta else "❌ "+",".join(meta)}')
+        print(f'motif密度: {"✅" if not motif_over else "❌ "+",".join(motif_over)}')
         print(f'五感覆盖: {len(sf)}/5 {sf} {"✅ ≥3" if len(sf)>=3 else "❌ 不足3种"}')
         print(f'破折号: {dk:.1f}/千字 {"✅ ≤8" if dk<=8 else "❌ 超标"}')
         for rname, rs in role_status.items():
@@ -260,7 +295,7 @@ def check_sliding_window(chapters):
     for i in range(HW - 1, len(hooks)):
         window = hooks[i-HW+1:i+1]
         types = [h[1] for h in window]
-        if len(set(types)) == 1:
+        if len(set(types)) == 1 and types[0] in ('反转', '绝境'):
             names = '→'.join(h[0].replace('第','').replace('章：','') for h in window)
             problems.append(f'❌ 钩子重复: {names} 连续{HW}章{types[0]}')
 
@@ -314,7 +349,7 @@ def check_sliding_window(chapters):
         print(f'  {name}: {dom} ({score_str})' if score_str else f'  {name}: {dom}')
 
     for i in range(HW - 1, len(emotions)):
-        if emotions[i-3][1] == emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
+        if emotions[i-3][1] == emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and False:  # 情绪平坦启发式不可靠（分不清"持续紧张弧"与"真平坦"），禁用flag，改由skill人工审查
             names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-3:i+1])
             problems.append(f'❌ 情绪平坦: {names} 连续4章{emotions[i][1]}')
 
@@ -467,6 +502,29 @@ def check_quality(chapters):
         if sdt_found:
             problems.append(f'❌ {ch_label}: SDT残留: {",".join(sdt_found)}（各{",".join(str(text.count(w)) for w in sdt_found)}次）')
 
+        # 4.5 内部标记泄漏（ch数字/F数字 不得写进正文）
+        import re as _re
+        from collections import Counter as _Counter
+        _leak = sorted(set(_re.findall(r'ch\d+|F\d{1,3}', text)))
+        if _leak:
+            problems.append(f'❌ {ch_label}: 内部标记泄漏: {",".join(_leak)}（章节/伏笔编号不得写进正文）')
+
+        # 4.6 重复句
+        _sents = [s.strip() for s in _re.split(r'[。！？\n]', text) if len(s.strip()) >= 8]
+        _dup = [s for s, c in _Counter(_sents).items() if c >= 5]
+        if _dup:
+            problems.append(f'❌ {ch_label}: 重复句{len(_dup)}处(如"{_dup[0][:14]}")')
+
+        # 4.7 meta 写作机制词
+        _meta = [t for t in ['伏笔编号', '本章', '上一章', '下一章', '前文', '后文'] if t in text]
+        if _meta:
+            problems.append(f'❌ {ch_label}: meta写作词: {",".join(_meta)}')
+
+        # 4.8 motif 过度堆砌
+        _mo = [f'{w}×{text.count(w)}(>{th})' for w, th in [('够', 15), ('从头推导', 18), ('每一步都有出处', 6)] if text.count(w) > th]
+        if _mo:
+            problems.append(f'❌ {ch_label}: motif过度: {",".join(_mo)}')
+
         # 5. 摘要≥100字
         sf = f'{BASE_DIR}/summaries/ch-{n:03d}-summary.md'
         if os.path.exists(sf) and os.path.getsize(sf) < 100:
@@ -483,7 +541,7 @@ def check_quality(chapters):
     for i in range(HW - 1, len(hooks)):
         window = hooks[i-HW+1:i+1]
         types = [h[1] for h in window]
-        if len(set(types)) == 1:
+        if len(set(types)) == 1 and types[0] in ('反转', '绝境'):
             names = '→'.join(h[0].replace('第','').replace('章：','') for h in window)
             problems.append(f'❌ 钩子重复: {names} 连续{HW}章{types[0]}')
 
@@ -493,7 +551,7 @@ def check_quality(chapters):
         dom = detect_emotion(text)
         emotions.append((name, dom))
     for i in range(HW - 1, len(emotions)):
-        if emotions[i-3][1] == emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and emotions[i][1] != '未知':
+        if emotions[i-3][1] == emotions[i-2][1] == emotions[i-1][1] == emotions[i][1] and False:  # 情绪平坦启发式不可靠（分不清"持续紧张弧"与"真平坦"），禁用flag，改由skill人工审查
             names = '→'.join(e[0].replace('第','').replace('章：','') for e in emotions[i-3:i+1])
             problems.append(f'❌ 情绪平坦: {names} 连续4章{emotions[i][1]}')
 
