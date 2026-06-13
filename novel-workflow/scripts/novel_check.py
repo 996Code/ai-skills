@@ -386,6 +386,22 @@ def check_process(chapters):
                 issues_by_ch[n].append(f'缺少审查: {rf}')
             elif os.path.getsize(rpath) < 150:
                 issues_by_ch[n].append(f'审查文件过短(<150字节，疑似模板): {rf}')
+            else:
+                # 审查质量：必须包含本章具体场景/事件名，不能只是模板填充
+                rtext = open(rpath, encoding='utf-8').read()
+                # 检查是否包含章节号引用（至少表明审查过本章）
+                has_ch_ref = f'第{n}章' in rtext or f'ch-{n:03d}' in rtext or f'ch{n}' in rtext or f'ch{n:03d}' in rtext
+                # 检查是否为纯模板填充（只有"通过无问题P0=0"这种空话）
+                template_keywords = ['通过无问题P0=0', '审查通过无问题', '无P0问题']
+                is_template = any(kw in rtext for kw in template_keywords)
+                # 检查是否包含具体场景/事件名（至少2个中文字符的词组）
+                import re as _re
+                scene_words = _re.findall(r'[\u4e00-\u9fff]{3,8}', rtext)
+                has_scene = len(scene_words) >= 5  # 至少5个中文词组
+                if not has_ch_ref and not has_scene:
+                    issues_by_ch[n].append(f'审查疑似模板填充(无章节引用/无具体场景): {rf}')
+                elif is_template:
+                    issues_by_ch[n].append(f'审查疑似模板填充(纯模板词): {rf}')
 
     # 时间线
     timeline_file = f'{BASE_DIR}/planning/bible/timeline.md'
@@ -482,13 +498,24 @@ def check_quality(chapters):
         if repeated:
             problems.append(f'❌ {ch_label}: 重复段落（疑似padding循环），重复段示例: {repeated[0]}...')
 
-        # 2. 审查文件质量：每个≥150字节？
+        # 2. 审查文件质量：每个≥150字节？是否模板填充？
         rd = f'{BASE_DIR}/reviews/per-chapter/ch-{n:03d}'
         if os.path.exists(rd):
             for rf in REVIEW_FILES:
                 rp = f'{rd}/{rf}'
                 if os.path.exists(rp) and os.path.getsize(rp) < 150:
                     problems.append(f'❌ {ch_label}: 审查文件过短 {rf} ({os.path.getsize(rp)}B)')
+                elif os.path.exists(rp):
+                    rtext = open(rp, encoding='utf-8').read()
+                    # 模板填充检测
+                    template_keywords = ['通过无问题P0=0', '审查通过无问题', '无P0问题']
+                    if any(kw in rtext for kw in template_keywords):
+                        problems.append(f'❌ {ch_label}: 审查疑似模板填充 {rf}')
+                    # 场景/事件名检测
+                    import re as _re2
+                    scene_words = _re2.findall(r'[\u4e00-\u9fff]{3,8}', rtext)
+                    if len(scene_words) < 5:
+                        problems.append(f'❌ {ch_label}: 审查缺少具体场景名 {rf}')
 
         # 3. 破折号密度>10/千字（对话密集章节可能天然高，但>10需要关注）
         chars = wc(text)
