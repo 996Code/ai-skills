@@ -192,7 +192,7 @@ def check_single(name, text, verbose=False):
     if leak:
         issues.append(f'内部标记泄漏:{",".join(leak)}')
 
-    # 2.6 重复句（确凿padding：同句≥8字出现≥5次；2-4次多为motif回扣风格，不算）
+    # 2.6 重复句（同句≥8字出现≥5次=确凿padding；2次复沓多为motif风格，靠人工复查抓）
     from collections import Counter
     _sents = [s.strip() for s in re.split(r'[。！？\n]', text) if len(s.strip()) >= 8]
     dup = [s for s, c in Counter(_sents).items() if c >= 5]
