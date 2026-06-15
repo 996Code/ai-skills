@@ -498,24 +498,38 @@ def check_quality(chapters):
         if repeated:
             problems.append(f'❌ {ch_label}: 重复段落（疑似padding循环），重复段示例: {repeated[0]}...')
 
-        # 2. 审查文件质量：每个≥150字节？是否模板填充？
+        # 2. 审查质量：必须包含本章具体场景/事件名，不能只是模板填充
         rd = f'{BASE_DIR}/reviews/per-chapter/ch-{n:03d}'
         if os.path.exists(rd):
+            # 从正文提取本章事件名（3-8字中文词组）
+            text_file = f'{BASE_DIR}/text/第{n}章*.txt'
+            text_files = glob.glob(text_file)
+            chapter_events = []
+            if text_files:
+                ch_text = open(text_files[0], encoding='utf-8').read()
+                raw_words = re.findall(r'[\u4e00-\u9fff]{3,8}', ch_text)
+                stop = set('的是了在有不这那和都与到可以这个什么没有不是还有因为所以如果'
+                           '一个一些一些他们她们它们我们大家然后接着接着接着然后接着接着')
+                chapter_events = list(set(w for w in raw_words if w not in stop and len(w) >= 3))
+            
             for rf in REVIEW_FILES:
                 rp = f'{rd}/{rf}'
-                if os.path.exists(rp) and os.path.getsize(rp) < 150:
+                if not os.path.exists(rp):
+                    continue
+                if os.path.getsize(rp) < 150:
                     problems.append(f'❌ {ch_label}: 审查文件过短 {rf} ({os.path.getsize(rp)}B)')
-                elif os.path.exists(rp):
-                    rtext = open(rp, encoding='utf-8').read()
-                    # 模板填充检测
-                    template_keywords = ['通过无问题P0=0', '审查通过无问题', '无P0问题']
-                    if any(kw in rtext for kw in template_keywords):
-                        problems.append(f'❌ {ch_label}: 审查疑似模板填充 {rf}')
-                    # 场景/事件名检测
-                    import re as _re2
-                    scene_words = _re2.findall(r'[\u4e00-\u9fff]{3,8}', rtext)
-                    if len(scene_words) < 5:
-                        problems.append(f'❌ {ch_label}: 审查缺少具体场景名 {rf}')
+                    continue
+                rtext = open(rp, encoding='utf-8').read()
+                # 模板填充检测
+                template_keywords = ['通过无问题P0=0', '审查通过无问题', '无P0问题', '建议直接合并']
+                if any(kw in rtext for kw in template_keywords):
+                    problems.append(f'❌ {ch_label}: 审查疑似模板填充 {rf}')
+                    continue
+                # 事件名匹配检测：审查文件应包含至少2个本章事件名
+                if chapter_events:
+                    matched = sum(1 for e in chapter_events if e in rtext)
+                    if matched < 2:
+                        problems.append(f'❌ {ch_label}: 审查缺少具体事件名 {rf} (匹配{matched}/2)')
 
         # 3. 破折号密度>10/千字（对话密集章节可能天然高，但>10需要关注）
         chars = wc(text)
