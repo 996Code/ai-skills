@@ -46,6 +46,7 @@
 - 网文速查：`skill/references/web-novel-quickref.md` — 中文网文核心方法论
 - 写作原则：`skill/references/writing-principles.md`
 - 叙事框架：`skill/references/narrative-frameworks.md` — 11种叙事结构框架
+- 长篇避坑：`skill/references/long-form-pitfalls.md` — AI长篇创作9大陷阱+防御（开新书必读）
 - 文档模板：`skill/templates/` — creative-brief / bible / outline / summary / decisions / deferred
 
 ## 当前项目
