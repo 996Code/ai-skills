@@ -199,6 +199,12 @@ def check_single(name, text, verbose=False):
     if dup:
         issues.append(f'重复句{len(dup)}处(如"{dup[0][:14]}")')
 
+    # 2.6b 段落级重复（整段≥15字出现≥2次=脚本反复编辑残留/padding循环，必抓）
+    _paras = [p.strip() for p in text.split('\n') if len(p.strip()) >= 15]
+    para_dup = [p for p, c in Counter(_paras).items() if c >= 2]
+    if para_dup:
+        issues.append(f'重复段落{len(para_dup)}处(如"{para_dup[0][:14]}")')
+
     # 2.7 meta 写作机制词（破第四面墙：正文不该出现这些写作术语）
     meta = [t for t in ['伏笔编号', '本章', '上一章', '下一章', '前文', '后文'] if t in text]
     if meta:
@@ -251,6 +257,7 @@ def check_single(name, text, verbose=False):
         print(f'Show Don\'t Tell: {"✅ 无违禁" if not sdt else "❌ " + ", ".join(sdt)}')
         print(f'内部标记: {"✅ 无泄漏" if not leak else "❌ " + ",".join(leak) + "(章节/伏笔编号不得写进正文)"}')
         print(f'重复句: {"✅" if not dup else "❌ "+str(len(dup))+"处"}')
+        print(f'重复段落: {"✅" if not para_dup else "❌ "+str(len(para_dup))+"处(脚本编辑残留)"}')
         print(f'meta词: {"✅" if not meta else "❌ "+",".join(meta)}')
         print(f'motif密度: {"✅" if not motif_over else "❌ "+",".join(motif_over)}')
         print(f'五感覆盖: {len(sf)}/5 {sf} {"✅ ≥3" if len(sf)>=3 else "❌ 不足3种"}')
