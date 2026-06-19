@@ -6,9 +6,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "OUTPUT=$(python3 \"$CLAUDE_PROJECT_DIR/scripts/novel_check.py\" 2>&1); EXIT=$?; echo \"[$(date '+%Y-%m-%d %H:%M:%S')] exit=$EXIT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; echo \"$OUTPUT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; if [ $EXIT -ne 0 ]; then echo \"$OUTPUT\" | grep -E '❌|不合格|缺失|重复|建议重写|大纲' | head -10; echo '{\"systemMessage\": \"全检未通过！请修复问题后再继续。字数差>200建议重写场景，不要逐句追加。大纲缺失需先补大纲。\", \"continue\": true}'; else echo '{\"systemMessage\": \"全检通过\", \"continue\": true}'; fi",
-            "timeout": 60,
-            "statusMessage": "全量检查（正文+滑动+流程文档）..."
+            "command": "OUTPUT=$(python3 \"$CLAUDE_PROJECT_DIR/scripts/novel_check.py\" 2>&1); EXIT=$?; echo \"[$(date '+%Y-%m-%d %H:%M:%S')] exit=$EXIT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; echo \"$OUTPUT\" >> \"$CLAUDE_PROJECT_DIR/.claude/logs/hook.log\"; if [ $EXIT -ne 0 ]; then HARD=$(echo \"$OUTPUT\" | grep -E '字数.*(❌|⚠)|SDT违禁|破折号.*>|重复句|重复段落|内部标记|motif密度.*超标|五感.*<3|比喻重复.*❌|情绪曲线.*❌|钩子.*❌' | head -15); echo \"{\\\"systemMessage\\\": \\\"全检未通过！硬伤：\\n${HARD}\\\n请修复后再继续。\\\", \\\"continue\\\": true}\"; else echo '{\"systemMessage\": \"全检通过 ✅\", \"continue\": true}'; fi",
+            "timeout": 120,
+            "statusMessage": "全量检查（正文+滑动窗口+流程文档）..."
           }
         ]
       }
