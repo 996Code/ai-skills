@@ -1,0 +1,24 @@
+{
+  "name": "vision-mcp",
+  "version": "0.1.0",
+  "description": "Image recognition MCP server over an OpenAI-compatible vision API (default qwen3.7-plus)",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": { "vision-mcp": "dist/index.js" },
+  "engines": { "node": ">=18.0.0" },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:integration": "vitest run tests/integration.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.0.0"
+  }
+}
