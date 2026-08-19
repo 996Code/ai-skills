@@ -74,4 +74,5 @@ npm run test:integration                  # 真实后端
 - 工具报 `API error: HTTP 401`：密钥错误；`HTTP 404`：`VISION_BASE_URL` 不对（须含 `/v1`）。
 - 换模型：改 `VISION_MODEL` 为端点上的其他视觉模型。
 - 关闭/开启思考等厂商参数：`VISION_EXTRA_BODY` 传 JSON。
+- **工具调用超时（如客户端 30 秒限制）**：思考型视觉模型（qwen 系）默认开思考，长任务可达 1 分钟以上；建议设 `VISION_EXTRA_BODY={"enable_thinking": false}`（实测 81s → 15s，答案质量不受影响）。
 - 本地图片须 >10px（常见上游限制），≤10MB。
