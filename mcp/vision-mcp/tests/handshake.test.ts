@@ -60,7 +60,7 @@ describe('stdio handshake', () => {
       const tools = await listTools();
       expect(tools.map((t) => t.name).sort()).toEqual([
         'analyze_data_visualization',
-        'analyze_image',
+        'analyze_image_local',
         'diagnose_error_screenshot',
         'extract_text_from_screenshot',
         'ui_diff_check',

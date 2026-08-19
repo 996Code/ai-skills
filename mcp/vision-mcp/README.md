@@ -7,7 +7,7 @@ OpenAI 兼容视觉模型接口（如 qwen-vl、GLM-4.6V 等多模态模型）�
 
 | 工具 | 用途 |
 |---|---|
-| `analyze_image` | 通用图片识别（兜底） |
+| `analyze_image_local` | 通用图片识别（兜底；命名区别于 URL-only 的内置工具，避免路由混淆） |
 | `extract_text_from_screenshot` | OCR 文字提取（代码/终端/文档/场景） |
 | `diagnose_error_screenshot` | 报错截图诊断 + 修复建议 |
 | `understand_technical_diagram` | 架构图/流程图/UML/ER 解析（structured/mermaid/description） |

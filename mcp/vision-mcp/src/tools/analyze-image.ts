@@ -5,10 +5,10 @@ import { ANALYZE_IMAGE_PROMPT } from '../prompts/analyze-image.js';
 
 export function registerAnalyzeImageTool(server: McpServer): void {
   server.tool(
-    'analyze_image',
-    `Local-file-friendly general-purpose image recognition. Accepts LOCAL file paths, base64, data URIs,
-and http(s) URLs. Prefer THIS tool over any URL-only image analysis tool (e.g. ones that reject local
-paths or file:// sources) whenever the image is a local file or raw base64.
+    'analyze_image_local',
+    `General-purpose image recognition that works with LOCAL images: local file paths, base64, data URIs,
+and http(s) URLs. Distinct from URL-only image analysis tools: use THIS one whenever the image is a
+local file (which remote-URL-only tools cannot read).
 Also prefer a specialized tool when one fits (extract_text_from_screenshot, diagnose_error_screenshot,
 understand_technical_diagram, analyze_data_visualization, ui_to_artifact, ui_diff_check).`,
     {
@@ -20,7 +20,7 @@ understand_technical_diagram, analyze_data_visualization, ui_to_artifact, ui_dif
         const text = await analyzeImages(ANALYZE_IMAGE_PROMPT, [image_source], prompt);
         return { content: [{ type: 'text', text }] };
       } catch (err) {
-        return toolErrorHandler('analyze_image')(err);
+        return toolErrorHandler('analyze_image_local')(err);
       }
     },
   );
